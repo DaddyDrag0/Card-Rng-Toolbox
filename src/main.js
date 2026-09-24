@@ -1006,6 +1006,26 @@ function depthAuraBlock(team, type, label, auraKey, borderKey) {
   `
 }
 
+function depthsProgressText(progress, teamIndex, fallbackRuns, startFloor) {
+  if (!progress) return null
+  const done = Number(progress.completedRuns) || 0
+  const total = Number(progress.totalRuns) || fallbackRuns || 1
+  const active = Number(progress.activeRuns) || Math.max(1, total - done)
+  const currentFloor = Number(progress.floor) || startFloor || 1
+  const minFloor = Number(progress.minActiveFloor) || currentFloor
+  const maxFloor = Number(progress.maxActiveFloor) || minFloor
+  const range = minFloor === maxFloor
+    ? 'Floor ' + Number(minFloor).toLocaleString()
+    : 'Floors ' + Number(minFloor).toLocaleString() + '–' + Number(maxFloor).toLocaleString()
+  const turn = Number(progress.battleTurn) || 0
+  const enemies = Array.isArray(progress.enemies) ? progress.enemies : []
+  const matchup = turn >= 150 && enemies.length ? ' · vs ' + enemies.join(' / ') : ''
+  return {
+    title: 'Team ' + (teamIndex + 1) + ' · ' + done + '/' + total + ' runs done · ' + active + ' active',
+    detail: range + (turn ? ' · current T' + turn : '') + matchup,
+    pct: Math.min(100, Math.max(0, Math.round((done / Math.max(1,total)) * 100))),
+  }
+}
 function depthsPage() {
   const state = depthsToolState()
   const team = state.teams[state.activeTeam]
@@ -1140,7 +1160,10 @@ function depthsPage() {
               </div>
             </div>
 
-            ${depthsProgress[state.activeTeam] ? `<div class="search-progress"><div><strong>Running Team ${state.activeTeam+1}</strong><span>${Number(depthsProgress[state.activeTeam].completedRuns || 0)}/${Number(depthsProgress[state.activeTeam].totalRuns || state.runs)} runs</span></div><div class="progress-track"><i style="width:${Math.round((Number(depthsProgress[state.activeTeam].completedRuns || 0) / Math.max(1, Number(depthsProgress[state.activeTeam].totalRuns || state.runs))) * 100)}%"></i></div></div>` : ''}
+            ${depthsProgress[state.activeTeam] ? (() => {
+              const progress = depthsProgressText(depthsProgress[state.activeTeam], state.activeTeam, state.runs, state.startFloor)
+              return `<div class="search-progress depths-live-progress"><div><strong>${esc(progress.title)}</strong><span>${esc(progress.detail)}</span></div><div class="progress-track"><i style="width:${progress.pct}%"></i></div></div>`
+            })() : ''}
 
             <div class="depths-exact-sim-actions">
               ${running ? '<button class="secondary-run" disabled>Simulation running…</button><button class="sim-run" data-depth-cancel>Cancel simulation</button>' : `<button class="secondary-run" data-depth-run-active ${!depthsTeamReady(team)?'disabled':''}>Test Team ${state.activeTeam+1}</button><button class="sim-run" data-depth-run-ready ${ready===0?'disabled':''}>Test ${ready} Ready Team${ready===1?'':'s'}</button>`}
