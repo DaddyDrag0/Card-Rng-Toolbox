@@ -218,3 +218,15 @@ h1,h2,h3,p{margin:0}
   .metrics,.two-col{grid-template-columns:1fr}
   .inventory-head,.inventory-row{grid-template-columns:1fr 90px 50px}
 }
+
+.data-manager{margin-bottom:27px}
+.data-manager-body{display:flex;align-items:center;justify-content:space-between;gap:18px}
+.data-manager-body b,.data-manager-body span{display:block}
+.data-manager-body b{font-size:11px}
+.data-manager-body span{margin-top:4px;color:var(--muted);font-size:9px}
+.data-manager-body small{color:var(--muted);font-size:8px;white-space:nowrap}
+.tools-head{margin-top:2px}
+@media(max-width:700px){
+  .data-manager-body{align-items:flex-start;flex-direction:column}
+  .data-manager-body small{white-space:normal}
+}
