@@ -854,7 +854,7 @@ function depthsPage() {
     <div class="depth-team-tabs">
       ${state.teams.map((item,index) => {
         const result = depthsResults[index]
-        return `<button data-depth-team="${index}" class="${state.activeTeam===index?'on':''}"><strong>Team ${index+1}</strong><small>${result ? 'Range ' + compactNumber(result.estimatedFloorLow) + '–' + compactNumber(result.estimatedFloorHigh) : depthsTeamReady(item) ? 'Ready' : 'Empty'}</small></button>`
+        return `<button data-depth-team="${index}" class="${state.activeTeam===index?'on':''}"><strong>Team ${index+1}</strong><small>${result ? (result.error ? 'Error' : 'Range ' + compactNumber(result.estimatedFloorLow) + '–' + compactNumber(result.estimatedFloorHigh)) : depthsTeamReady(item) ? 'Ready' : 'Empty'}</small></button>`
       }).join('')}
     </div>
 
@@ -1066,6 +1066,10 @@ function saveJson() {
   }
 }
 
+function clearDepthResult(index) {
+  delete depthsResults[index]
+}
+
 function startDepthsRuns(indices) {
   const state = depthsToolState()
   for (const index of indices) {
@@ -1273,6 +1277,11 @@ function bind() {
   document.querySelectorAll('[data-action="close-modal"]').forEach(button => button.onclick = closeModal)
   document.querySelectorAll('[data-action="save-json"]').forEach(button => button.onclick = saveJson)
   document.querySelectorAll('[data-profile-id]').forEach(button => button.onclick = () => {
+    deckResults = []
+    deckError = ''
+    towerResult = null
+    towerError = ''
+    for (const key of Object.keys(depthsResults)) delete depthsResults[key]
     store.setActiveProfile(button.dataset.profileId)
     render()
   })
@@ -1363,8 +1372,8 @@ function bind() {
     const current = towerToolState()
     const poolOverrides = { ...(current.poolOverrides || {}) }
     poolOverrides[name] = !towerPoolEnabled(name)
-    updateTowerToolState({ poolOverrides })
     towerResult = null
+    updateTowerToolState({ poolOverrides })
   }))
   document.querySelector('[data-tower-search]')?.addEventListener('click', startTowerSearch)
   document.querySelector('[data-tower-cancel]')?.addEventListener('click', cancelTowerSearch)
@@ -1376,28 +1385,28 @@ function bind() {
     updateDepthsToolState(state => { state.activeSlot = Number(button.dataset.depthSlot) })
   }))
   document.querySelectorAll('[data-depth-card]').forEach(button => button.addEventListener('click', () => {
+    clearDepthResult(depthsToolState().activeTeam)
     updateDepthsToolState(state => {
       const slot = state.teams[state.activeTeam].cards[state.activeSlot]
       slot.cardName = button.dataset.depthCard
       slot.mutationWeather = ''
     })
-    delete depthsResults[depthsToolState().activeTeam]
   }))
   document.querySelectorAll('[data-depth-border]').forEach(button => button.addEventListener('click', () => {
+    clearDepthResult(depthsToolState().activeTeam)
     updateDepthsToolState(state => {
       const slot = state.teams[state.activeTeam].cards[state.activeSlot]
       const border = button.dataset.depthBorder
       slot.borders = slot.borders.includes(border) ? slot.borders.filter(value => value !== border) : [...slot.borders, border]
     })
-    delete depthsResults[depthsToolState().activeTeam]
   }))
   document.querySelector('#depthMutation')?.addEventListener('change', event => {
     updateDepthsToolState(state => { state.teams[state.activeTeam].cards[state.activeSlot].mutationWeather = event.target.value })
   })
-  document.querySelector('#depthStatAura')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].statAura = event.target.value }))
-  document.querySelector('#depthStatBorder')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].statAuraBorder = event.target.value }))
-  document.querySelector('#depthAbilityAura')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAura = event.target.value }))
-  document.querySelector('#depthAbilityBorder')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAuraBorder = event.target.value }))
+  document.querySelector('#depthStatAura')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].statAura = event.target.value }) })
+  document.querySelector('#depthStatBorder')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].statAuraBorder = event.target.value }) })
+  document.querySelector('#depthAbilityAura')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAura = event.target.value }) })
+  document.querySelector('#depthAbilityBorder')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAuraBorder = event.target.value }) })
   document.querySelector('[data-depth-owned-toggle]')?.addEventListener('click', () => updateDepthsToolState(state => { state.ownedOnly = !state.ownedOnly }))
   const depthSearch = document.querySelector('#depthSearch')
   if (depthSearch) depthSearch.oninput = () => {
