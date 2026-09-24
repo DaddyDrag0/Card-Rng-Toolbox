@@ -140,6 +140,7 @@ function sidebar() {
 }
 
 function header() {
+  if (['deck-helper','depths','tower','library','calculators'].includes(route)) return ''
   const tool = toolById(route)
   return `
     <header class="topbar">
@@ -691,10 +692,9 @@ function towerPage() {
             const card = cardByName(name)
             return `
               <label class="tower-enemy-box">
-                ${cardImage(card,'tower-enemy-image')}
                 <span>Enemy ${index + 1}</span>
                 <input data-tower-enemy="${index}" list="towerCardNames" value="${esc(name)}">
-                <small>${esc(card?.ability || 'Unknown ability')}</small>
+                <div class="tower-enemy-preview">${cardImage(card,'card-thumb-sm')}<div><b>${esc(card?.name || name)}</b><small>${esc(card?.ability || 'Unknown ability')}</small></div></div>
               </label>
             `
           }).join('')}
@@ -937,6 +937,75 @@ function depthLoadout(team) {
   }
 }
 
+
+const DEPTH_BORDER_MULT = { Platinum:100, Crystal:10000, Ruby:100000, Galaxy:1000000 }
+const DEPTH_MUTATION_MULT = { Storm:1.1, Snow:1.2, Aurora:1.3, Shroud:1.5, 'Meteor Shower':1.8, 'Time Storm':2, Eclipse:2.5, Virus:3, 'Blood Rain':3.5, Armageddon:4, Manga:4.5 }
+const DEPTH_AURA_RARITY_MULT = { Platinum:10, Crystal:100, Galaxy:1000 }
+const DEPTH_AURA_TIER = { '':0, Platinum:1, Crystal:2, Galaxy:3 }
+const DEPTH_AURA_CUSTOM = {
+  Berserker:[5,10,15,20],
+  'Flame Wizard':[15,25,35,50],
+  Shielder:[2,5,7,10],
+  'Synth Human':[8,10,12,15],
+  'Storm Spirit':[10,15,20,30],
+  'Guardian Angel':[10,15,20,30],
+  Executioner:[15,25,35,50],
+  'Mirror Knight':[10,15,20,30],
+  'Final Testament':[5,7.5,10,12.5,15],
+}
+
+function depthMutationEligible(card) {
+  return Boolean(card && !card.weather && !card.boss && !card.expires && !card.unobtainable)
+}
+
+function depthCardPower(card, borders = [], mutationWeather = '') {
+  if (!card) return 0
+  let rarity = card.name === 'Ouroboros' ? 100000000000000 : Number(card.rarity || 0)
+  for (const border of borders) rarity *= DEPTH_BORDER_MULT[border] || 1
+  const mutation = DEPTH_MUTATION_MULT[mutationWeather] || 1
+  return rarity > 0 ? Math.pow(2, Math.log10(rarity)) * 10 * (Number(card.statMultiplier) || 1) * mutation : 0
+}
+
+function depthCardStats(card, slot) {
+  const power = depthCardPower(card, slot?.borders || [], slot?.mutationWeather || '')
+  return { hp: power * (Number(card?.hpMultiplier) || 1), attack: power / 2 }
+}
+
+function depthAuraValue(aura, border) {
+  if (!aura) return 0
+  if (aura.type === 'Stat') {
+    const rarity = (Number(aura.rarity) || 0) * (DEPTH_AURA_RARITY_MULT[border] || 1)
+    return rarity > 0 ? Math.floor(Math.pow(2, Math.log10(rarity)) / 2) : 0
+  }
+  const tier = DEPTH_AURA_TIER[border] || 0
+  const custom = DEPTH_AURA_CUSTOM[aura.name]
+  return custom ? (custom[tier] ?? custom[0] ?? 0) : (Number(aura.base) || 0) + (Number(aura.perLevel) || 0) * tier
+}
+
+function depthAuraBlock(team, type, label, auraKey, borderKey) {
+  const choices = depthAuraOptions(type)
+  const selected = auraCatalog.find(aura => aura.name === team[auraKey]) || null
+  const border = team[borderKey] || ''
+  const value = depthAuraValue(selected, border)
+  const desc = selected?.description ? String(selected.description).replace(/(\d+(?:\.\d+)?)?STAT/g, (_,coef) => ((coef ? Number(coef) : 1) * value).toFixed(1).replace(/\.0$/,'') + '%') : ''
+  return `
+    <div class="depth-exact-aura-card">
+      <div class="depth-exact-aura-title">
+        ${selected ? cardImage(selected,'depth-exact-aura-image') : '<span class="depth-exact-aura-image depth-empty-image">◇</span>'}
+        <span><b>${label}</b><small>${esc(selected?.skillName || selected?.type || 'Choose one aura')}</small></span>
+      </div>
+      <select data-depth-aura-select="${auraKey}">
+        <option value="">No ${label.toLowerCase()}</option>
+        ${choices.map(aura => `<option value="${esc(aura.name)}" ${aura.name===team[auraKey]?'selected':''}>${esc(aura.name)} · ${esc(aura.skillName || '')}</option>`).join('')}
+      </select>
+      <div class="depth-exact-aura-pills">
+        ${['','Platinum','Crystal','Galaxy'].map(option => `<button type="button" data-depth-aura-border-key="${borderKey}" data-depth-aura-border="${option}" class="${border===option?'on':''}">${option || 'Base'}</button>`).join('')}
+      </div>
+      ${selected ? `<div class="depth-exact-aura-summary">${selected.type==='Stat' ? `<div><span>All allied cards</span><b>+${value}%</b><small>HP & ATK</small></div>` : `<p>${esc(desc || selected.description || '')}</p>`}</div>` : ''}
+    </div>
+  `
+}
+
 function depthsPage() {
   const state = depthsToolState()
   const team = state.teams[state.activeTeam]
@@ -947,199 +1016,164 @@ function depthsPage() {
     .filter(card => !state.ownedOnly || !activeProfile().import.importedAt || owned.has(card.name))
     .filter(card => !query || card.name.toLowerCase().includes(query) || String(card.ability || '').toLowerCase().includes(query))
     .sort((a,b) => b.rarity - a.rarity)
-    .slice(0,140)
+    .slice(0,100)
 
   const ready = state.teams.filter(depthsTeamReady).length
-  const statAuras = depthAuraOptions('Stat')
-  const skillAuras = depthAuraOptions('Skill')
   const activeBans = state.depthBanLayouts[state.activeDepthBanLayout] || []
   const banQuery = state.depthBanQuery.trim().toLowerCase()
   const banCandidates = banQuery
     ? cardCatalog.filter(depthBanEligible).filter(card => !activeBans.includes(card.name))
         .filter(card => card.name.toLowerCase().includes(banQuery) || String(card.ability || '').toLowerCase().includes(banQuery))
-        .sort((a,b) => a.name.localeCompare(b.name)).slice(0,10)
+        .sort((a,b) => a.name.localeCompare(b.name)).slice(0,8)
     : []
   const running = depthsWorkers.size > 0
 
   return `
-    <section class="page-intro depths-title-row">
-      <div>
-        <p class="kicker">DEPTHS</p>
-        <h2>Depths Calculator</h2>
-        <p>Full Toolbox version using the copied Depths engine.</p>
-      </div>
-      <div class="depth-page-actions">
-        <button class="secondary small" data-depth-clear-results ${Object.keys(depthsResults).length ? '' : 'disabled'}>Clear Results</button>
-      </div>
-    </section>
+    <div class="depths-exact">
+      <header class="depths-exact-topbar">
+        <div><p class="kicker">CARD RNG EXPANSION</p><h1>Depths Calculator</h1></div>
+      </header>
 
-    <div class="depth-team-tabs depth-team-tabs-actions">
-      ${state.teams.map((item,index) => {
-        const result = depthsResults[index]
-        return `<button data-depth-team="${index}" class="${state.activeTeam===index?'on':''}"><strong>Team ${index+1}</strong><small>${result ? (result.error ? 'Error' : 'Range ' + compactNumber(result.estimatedFloorLow) + '–' + compactNumber(result.estimatedFloorHigh)) : depthsTeamReady(item) ? 'Ready' : 'Empty'}</small></button>`
-      }).join('')}
-      <button class="depth-duplicate-tab" data-depth-duplicate><strong>Duplicate</strong><small>Copy active team</small></button>
-    </div>
+      <div class="depths-exact-tabs">
+        ${state.teams.map((item,index) => {
+          const result = depthsResults[index]
+          return `<button data-depth-team="${index}" class="${state.activeTeam===index?'on':''}"><span>Team ${index+1}</span><i>${result ? (result.error ? 'Error' : 'Range ' + compactNumber(result.estimatedFloorLow) + '–' + compactNumber(result.estimatedFloorHigh)) : depthsTeamReady(item) ? 'Ready' : 'Empty'}</i></button>`
+        }).join('')}
+        <button class="depths-exact-tab-action" data-depth-duplicate>Duplicate</button>
+      </div>
 
-    <div class="depth-native-grid">
-      <section class="panel depth-loadout-panel">
-        <div class="panel-head">
-          <div><p class="kicker">LOADOUT</p><h3>Team ${state.activeTeam+1}</h3></div>
-          <div class="panel-head-actions">
-            <button class="text-mini" data-depth-copy-team>Copy Code</button>
-            <button class="text-mini" data-depth-import-team>Import Code</button>
-            <button class="text-mini danger" data-depth-clear-team>Clear Team</button>
+      <section class="depths-exact-workspace">
+        <article class="panel depths-exact-loadout">
+          <div class="panel-head">
+            <div><span class="kicker">LOADOUT</span><h3>Team ${state.activeTeam+1}</h3></div>
+            <div class="panel-head-actions">
+              <button class="text-mini" data-depth-copy-team>Copy code</button>
+              <button class="text-mini" data-depth-import-team>Import code</button>
+              <button class="text-mini danger" data-depth-clear-team>Clear team</button>
+            </div>
           </div>
-        </div>
-        <div class="panel-body">
-          <div class="depth-slots">
+
+          <div class="depths-exact-team-list">
             ${team.cards.map((slot,index) => {
               const card = cardByName(slot.cardName)
+              if (!card) return `
+                <div class="depths-exact-team-row empty ${state.activeSlot===index?'active':''}" data-depth-slot="${index}" draggable="true">
+                  <span class="depths-exact-slot">0${index+1}</span>
+                  <span class="depths-exact-portrait depth-empty-image">+</span>
+                  <span class="depths-exact-card-copy"><span class="depths-exact-name-line"><b>Select a card</b></span><span class="depths-exact-numbers">Choose from the library</span></span>
+                </div>`
+
+              const mutation = depthMutationEligible(card) ? (slot.mutationWeather || '') : ''
+              const stats = depthCardStats(card, slot)
               return `
-                <button class="depth-slot ${state.activeSlot===index?'active':''}" data-depth-slot="${index}" draggable="true">
-                  <span class="depth-slot-num">0${index+1}</span>
-                  ${cardImage(card,'depth-slot-image')}
-                  <span class="depth-slot-copy"><strong>${esc(card?.name || 'Select a card')}</strong><small>${esc(card?.ability || 'Choose from library')}</small></span>
-                </button>
-                ${state.activeSlot===index && card ? `
-                  <div class="depth-slot-options">
-                    <div class="depth-border-row">
-                      ${DEPTH_BORDERS.map(border => `<button type="button" data-depth-border="${border}" class="${slot.borders?.includes(border)?'on':''}">${border}</button>`).join('')}
-                    </div>
-                    <label><span>Mutation</span><select id="depthMutation"><option value="">None</option>${DEPTH_MUTATIONS.map(weather => `<option value="${weather}" ${slot.mutationWeather===weather?'selected':''}>${weather}</option>`).join('')}</select></label>
-                  </div>
-                ` : ''}
-              `
+                <div class="depths-exact-team-row ${state.activeSlot===index?'active':''}" data-depth-slot="${index}" draggable="true">
+                  <span class="depths-exact-slot">0${index+1}</span>
+                  ${cardImage(card,'depths-exact-portrait')}
+                  <span class="depths-exact-card-copy">
+                    <span class="depths-exact-name-line"><b>${esc(card.name)}</b><em>${esc(card.ability || 'No ability')}</em></span>
+                    <span class="depths-exact-numbers"><i><b>${compactNumber(stats.hp)}</b> HP</i><i><b>${compactNumber(stats.attack)}</b> ATK</i>${mutation ? `<i><b>${esc(mutation)}</b> ×${DEPTH_MUTATION_MULT[mutation]} Mutation</i>` : ''}</span>
+                    <span class="depths-exact-border-pills">
+                      ${DEPTH_BORDERS.map(border => `<label class="${slot.borders.includes(border)?'on':''}" data-depth-border-slot="${index}" data-depth-border-name="${border}">${border}</label>`).join('')}
+                    </span>
+                    ${depthMutationEligible(card) ? `<label class="depths-exact-mutation">Mutation <select data-depth-mutation-slot="${index}"><option value="">None</option>${DEPTH_MUTATIONS.map(weather => `<option value="${weather}" ${mutation===weather?'selected':''}>${weather} · ×${DEPTH_MUTATION_MULT[weather]}</option>`).join('')}</select></label>` : ''}
+                  </span>
+                </div>`
             }).join('')}
           </div>
 
-          <div class="depth-aura-grid">
-            <label><span>Stat Aura</span><select id="depthStatAura"><option value="">None</option>${statAuras.map(aura => `<option value="${esc(aura.name)}" ${team.statAura===aura.name?'selected':''}>${esc(aura.name)}</option>`).join('')}</select></label>
-            <label><span>Stat Border</span><select id="depthStatBorder">${AURA_BORDERS.map(border => `<option value="${border}" ${team.statAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
-            <label><span>Skill Aura</span><select id="depthAbilityAura"><option value="">None</option>${skillAuras.map(aura => `<option value="${esc(aura.name)}" ${team.abilityAura===aura.name?'selected':''}>${esc(aura.name)}</option>`).join('')}</select></label>
-            <label><span>Skill Border</span><select id="depthAbilityBorder">${AURA_BORDERS.map(border => `<option value="${border}" ${team.abilityAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
+          <div class="depths-exact-aura-grid">
+            ${depthAuraBlock(team,'Stat','Stat Aura','statAura','statAuraBorder')}
+            ${depthAuraBlock(team,'Skill','Ability Aura','abilityAura','abilityAuraBorder')}
           </div>
-        </div>
-      </section>
+        </article>
 
-      <section class="panel depth-library-panel">
-        <div class="panel-head">
-          <div><p class="kicker">CARDS</p><h3>Slot ${state.activeSlot+1}</h3></div>
-          <button class="secondary small" data-depth-owned-toggle>${state.ownedOnly && activeProfile().import.importedAt ? 'Owned Only' : 'All Cards'}</button>
-        </div>
-        <div class="panel-body">
-          <input id="depthSearch" class="search-input" value="${esc(depthsQuery)}" placeholder="Search card or ability…" autocomplete="off">
-          <div class="depth-card-list">
-            ${selectable.map(card => `
+        <article class="panel depths-exact-library">
+          <div class="panel-head">
+            <div><span class="kicker">Cards</span><h3>Team ${state.activeSlot+1}</h3></div>
+            <small>${selectable.length} shown</small>
+          </div>
+          <div class="depth-library-toolbar">
+            <input id="depthSearch" class="depths-exact-search" value="${esc(depthsQuery)}" placeholder="Search card or ability…" autocomplete="off">
+            <button class="secondary small" data-depth-owned-toggle>${state.ownedOnly && activeProfile().import.importedAt ? 'Owned Only' : 'All Cards'}</button>
+          </div>
+          <div class="depths-exact-library-list">
+            ${selectable.length ? selectable.map(card => `
               <button data-depth-card="${esc(card.name)}" class="${team.cards[state.activeSlot]?.cardName===card.name?'selected':''}">
-                ${cardImage(card,'card-thumb-md')}
-                <span><strong>${esc(card.name)}</strong><small>${esc(card.ability || 'No ability')}</small></span>
-                <em>1 / ${Number(card.rarity).toLocaleString()}</em>
+                ${cardImage(card,'depths-exact-mini-portrait')}
+                <span><b>${esc(card.name)}</b><small>${esc(card.ability || 'No ability')}</small></span>
+                <em>1 / ${compactNumber(card.rarity)}</em>
               </button>
-            `).join('')}
+            `).join('') : '<div class="empty-state">No matching cards.</div>'}
           </div>
-        </div>
+        </article>
+
+        <article class="panel depths-exact-simulation">
+          <div class="panel-head">
+            <div><span class="kicker">DEPTHS TEST</span><h3>Run simulator</h3></div>
+            <small>${ready}/5 teams ready</small>
+          </div>
+          <div class="depths-exact-sim-body">
+            <div class="depths-exact-sim-field">
+              <span>Runs per team</span>
+              <div class="depths-exact-run-options">${[1,3,8,15,30,50].map(value => `<button data-depth-runs="${value}" class="${state.runs===value?'on':''}">${value}</button>`).join('')}</div>
+            </div>
+
+            <label class="depths-exact-sim-field"><span>Start floor</span><input id="depthStartFloor" type="number" min="1" max="40000" value="${state.startFloor}"><small>Skips floors below this during simulation. Max 40,000.</small></label>
+            <label class="depths-exact-sim-field"><span>Floor cap</span><input value="100000" readonly></label>
+            <label class="depths-exact-sim-field"><span>Battle Speed Structure</span><select id="depthStructureLevel">${Array.from({length:8},(_,value)=>`<option value="${value}" ${state.battleSpeedStructureLevel===value?'selected':''}>Level ${value} · +${(value*.25).toFixed(2)} Battle Speed</option>`).join('')}</select></label>
+            <label class="depths-exact-sim-field"><span>Skill Tree Battle Speed</span><select id="depthSkillLevel">${[0,.5,1,1.5,2.5].map((bonus,value)=>`<option value="${value}" ${state.skillTreeBattleSpeedLevel===value?'selected':''}>Level ${value} · +${bonus.toFixed(2)} Battle Speed</option>`).join('')}</select><small>Skill Tree values: +0.50, +0.50, +0.50, then +1.00 at level 4.</small></label>
+
+            <div class="depths-exact-relic ${state.chronoShard?'on':''}"><div><span>Chrono Shard</span><small>Relic · +1 Battle Speed. Turn this off if you do not own/use the relic.</small></div><button type="button" data-depth-chrono>${state.chronoShard?'ON':'OFF'}</button></div>
+            <div class="depths-exact-relic ${state.bountifulDepths?'on':''}"><div><span>Bountiful Depths</span><small>Relic · +25% potion drop chance. This changes reward estimates only, not combat.</small></div><button type="button" data-depth-bountiful>${state.bountifulDepths?'ON':'OFF'}</button></div>
+
+            <div class="depths-exact-ban-box">
+              <div class="depths-exact-ban-layouts">
+                <div class="depths-exact-ban-tabs">${state.depthBanLayouts.map((bans,index) => `<button type="button" data-depth-ban-layout="${index}" class="${state.activeDepthBanLayout===index?'on':''}"><span>Ban ${index+1}</span><small>${bans.length}/${MAX_DEPTH_BANS}</small></button>`).join('')}</div>
+                <div class="depths-exact-ban-actions"><button type="button" data-depth-ban-export>Export Bans</button><button type="button" data-depth-ban-import>Import Bans</button></div>
+              </div>
+              <div class="depths-exact-ban-head"><span>Depth bans · Ban ${state.activeDepthBanLayout+1}</span><div>${activeBans.length?'<button type="button" data-depth-ban-clear>Clear</button>':''}<b>${activeBans.length}/${MAX_DEPTH_BANS}</b></div></div>
+              <small>Optional player ban slots. Vampire Lord, Parallax, and Samurai are permanently banned and do not use these slots.</small>
+              ${activeBans.length ? `<div class="depths-exact-ban-chips">${activeBans.map((name,index)=>`<button type="button" data-depth-ban-remove="${index}">${esc(name)} ×</button>`).join('')}</div>` : ''}
+              <div class="depths-exact-ban-search">
+                <input id="depthBanSearch" value="${esc(state.depthBanQuery)}" placeholder="${activeBans.length>=MAX_DEPTH_BANS?'14/14 bans selected':'Search a card to ban…'}" ${activeBans.length>=MAX_DEPTH_BANS?'disabled':''}>
+                ${banQuery && activeBans.length<MAX_DEPTH_BANS ? `<div class="depths-exact-ban-suggestions">${banCandidates.length ? banCandidates.map(card=>`<button type="button" data-depth-ban-add="${esc(card.name)}"><span>${esc(card.name)}</span><small>${esc(card.ability || 'No ability')}</small></button>`).join('') : '<small>No eligible Depth enemies found.</small>'}</div>` : ''}
+              </div>
+            </div>
+
+            ${depthsProgress[state.activeTeam] ? `<div class="search-progress"><div><strong>Running Team ${state.activeTeam+1}</strong><span>${Number(depthsProgress[state.activeTeam].completedRuns || 0)}/${Number(depthsProgress[state.activeTeam].totalRuns || state.runs)} runs</span></div><div class="progress-track"><i style="width:${Math.round((Number(depthsProgress[state.activeTeam].completedRuns || 0) / Math.max(1, Number(depthsProgress[state.activeTeam].totalRuns || state.runs))) * 100)}%"></i></div></div>` : ''}
+
+            <div class="depths-exact-sim-actions">
+              ${running ? '<button class="secondary-run" disabled>Simulation running…</button><button class="sim-run" data-depth-cancel>Cancel simulation</button>' : `<button class="secondary-run" data-depth-run-active ${!depthsTeamReady(team)?'disabled':''}>Test Team ${state.activeTeam+1}</button><button class="sim-run" data-depth-run-ready ${ready===0?'disabled':''}>Test ${ready} Ready Team${ready===1?'':'s'}</button>`}
+            </div>
+          </div>
+        </article>
       </section>
 
-      <section class="panel depth-sim-panel">
-        <div class="panel-head"><div><p class="kicker">SIMULATOR</p><h3>Run Test</h3></div><span class="panel-count">${ready}/5 ready</span></div>
-        <div class="panel-body depth-sim-body">
-          <label><span>Runs</span><select id="depthRuns">${[1,3,8,15,30,50].map(value => `<option value="${value}" ${state.runs===value?'selected':''}>${value}</option>`).join('')}</select></label>
-          <label><span>Start Floor</span><input id="depthStartFloor" type="number" min="1" max="40000" value="${state.startFloor}"></label>
-          <label><span>Floor Cap</span><input value="100,000" readonly></label>
-          <label><span>Battle Speed Structure</span><select id="depthStructureLevel">${Array.from({length:8},(_,value)=>`<option value="${value}" ${state.battleSpeedStructureLevel===value?'selected':''}>Level ${value} · +${(value*.25).toFixed(2)}</option>`).join('')}</select></label>
-          <label><span>Skill Tree Battle Speed</span><select id="depthSkillLevel">${[0,.5,1,1.5,2.5].map((bonus,value)=>`<option value="${value}" ${state.skillTreeBattleSpeedLevel===value?'selected':''}>Level ${value} · +${bonus.toFixed(2)}</option>`).join('')}</select></label>
-
-          <div class="depth-toggle-row">
-            <button type="button" data-depth-chrono class="${state.chronoShard?'on':''}">Chrono Shard · ${state.chronoShard?'ON':'OFF'}</button>
-            <button type="button" data-depth-bountiful class="${state.bountifulDepths?'on':''}">Bountiful Depths · ${state.bountifulDepths?'ON':'OFF'}</button>
+      <section class="depths-exact-results">
+        <div class="depths-exact-results-title"><div><span class="kicker">DEPTHS TEST RESULTS</span><h3>${Object.keys(depthsResults).length ? 'Team comparison' : 'No simulations yet'}</h3></div>${Object.keys(depthsResults).length?'<button class="text-mini" data-depth-clear-results>Clear results</button>':''}</div>
+        ${Object.entries(depthsResults).length ? `
+          <div class="depths-exact-result-grid">
+            ${Object.entries(depthsResults).sort((a,b)=>Number(a[0])-Number(b[0])).map(([index,result]) => {
+              if (result.error) return `<article class="depths-exact-result-card"><div class="tool-error">Team ${Number(index)+1}: ${esc(result.error)}</div></article>`
+              const avgTurns = result.runs?.length ? result.runs.reduce((sum,run)=>sum + (Number(run.totalTurns)||0),0)/result.runs.length : 0
+              return `
+                <article class="depths-exact-result-card">
+                  <div class="depths-exact-result-head"><span class="kicker">TEAM ${Number(index)+1}</span></div>
+                  <div class="depths-exact-result-metrics">
+                    <div><span>Estimated Depth range</span><b>${compactNumber(result.estimatedFloorLow)} – ${compactNumber(result.estimatedFloorHigh)}</b></div>
+                    <div><span>Median Depth</span><b>${compactNumber(result.medianFloor)}</b></div>
+                    <div><span>Aura Pack reward</span><b>${compactNumber(result.auraPackLow)} – ${compactNumber(result.auraPackHigh)}</b><small>Median: ${compactNumber(result.auraPackMedian)}</small></div>
+                    <div><span>Estimated clear time</span><b>${durationLabel(result.estimatedSecondsMedian)}</b><small>${durationLabel(result.estimatedSecondsLow)}–${durationLabel(result.estimatedSecondsHigh)}</small></div>
+                    <div><span>Aura cards / hour</span><b>${compactNumber(result.auraCardsPerHour)}</b></div>
+                  </div>
+                  <div class="result-meta"><span>${result.runs?.length || 0} runs</span><span>${avgTurns.toFixed(1)} avg turns</span></div>
+                  ${result.runs?.length ? `<div class="depth-floor-strip">${result.runs.map((run,runIndex)=>`<button type="button" data-depth-run-detail="${index}:${runIndex}">${compactNumber(run.deathFloor)}</button>`).join('')}</div>` : ''}
+                </article>`
+            }).join('')}
           </div>
-
-          <div class="depth-ban-box">
-            <div class="depth-ban-top">
-              <div><span>Depth Bans</span><b>${activeBans.length}/${MAX_DEPTH_BANS}</b></div>
-              ${activeBans.length ? '<button type="button" data-depth-ban-clear>Clear</button>' : ''}
-            </div>
-            <div class="depth-ban-layout-tabs">
-              ${state.depthBanLayouts.map((bans,index) => `<button type="button" data-depth-ban-layout="${index}" class="${state.activeDepthBanLayout===index?'on':''}">Ban ${index+1}<small>${bans.length}/${MAX_DEPTH_BANS}</small></button>`).join('')}
-            </div>
-            <div class="depth-ban-actions">
-              <button type="button" data-depth-ban-export>Export Bans</button>
-              <button type="button" data-depth-ban-import>Import Bans</button>
-            </div>
-            <small class="depth-ban-help">Vampire Lord, Parallax, and Samurai are always banned and do not use these slots.</small>
-            ${activeBans.length ? `<div class="depth-ban-chips">${activeBans.map((name,index) => `<button type="button" data-depth-ban-remove="${index}">${esc(name)} ×</button>`).join('')}</div>` : ''}
-            <div class="depth-ban-search">
-              <input id="depthBanSearch" value="${esc(state.depthBanQuery)}" placeholder="${activeBans.length >= MAX_DEPTH_BANS ? '14/14 bans selected' : 'Search a card to ban…'}" ${activeBans.length >= MAX_DEPTH_BANS ? 'disabled' : ''}>
-              ${banQuery && activeBans.length < MAX_DEPTH_BANS ? `
-                <div class="depth-ban-suggestions">
-                  ${banCandidates.length ? banCandidates.map(card => `<button type="button" data-depth-ban-add="${esc(card.name)}"><span>${esc(card.name)}</span><small>${esc(card.ability || 'No ability')}</small></button>`).join('') : '<small>No eligible cards found.</small>'}
-                </div>
-              ` : ''}
-            </div>
-          </div>
-
-          ${depthsProgress[state.activeTeam] ? `
-            <div class="search-progress">
-              <div><strong>Running Team ${state.activeTeam+1}</strong><span>${Number(depthsProgress[state.activeTeam].completedRuns || 0)}/${Number(depthsProgress[state.activeTeam].totalRuns || state.runs)} runs</span></div>
-              <div class="progress-track"><i style="width:${Math.round((Number(depthsProgress[state.activeTeam].completedRuns || 0) / Math.max(1, Number(depthsProgress[state.activeTeam].totalRuns || state.runs))) * 100)}%"></i></div>
-            </div>
-          ` : ''}
-
-          <div class="tool-actions">
-            ${running
-              ? '<button class="secondary" data-depth-cancel>Cancel Simulation</button>'
-              : `<button class="secondary" data-depth-run-active ${!depthsTeamReady(team)?'disabled':''}>Test Team ${state.activeTeam+1}</button><button class="primary" data-depth-run-ready ${ready===0?'disabled':''}>Test ${ready} Ready Team${ready===1?'':'s'}</button>`}
-          </div>
-        </div>
+        ` : '<div class="depths-exact-results-empty">Build a complete four-card team, choose any auras you use, then run a test.</div>'}
       </section>
     </div>
-
-    <section class="panel native-results">
-      <div class="panel-head"><div><p class="kicker">RESULTS</p><h3>${Object.keys(depthsResults).length ? 'Team Comparison' : 'No simulations yet'}</h3></div></div>
-      <div class="panel-body">
-        ${Object.entries(depthsResults).length ? `
-          <div class="depth-result-grid">
-            ${Object.entries(depthsResults).sort((a,b)=>Number(a[0])-Number(b[0])).map(([index,result]) => result.error ? `
-              <article class="depth-result-card"><div class="tool-error">Team ${Number(index)+1}: ${esc(result.error)}</div></article>
-            ` : (() => {
-              const resultTeam = state.teams[index]
-              const avgTurns = Array.isArray(result.runs) && result.runs.length ? result.runs.reduce((sum,run)=>sum + (Number(run.totalTurns)||0),0) / result.runs.length : 0
-              const common = {}
-              for (const run of result.runs || []) for (const name of run.endingEnemies || []) common[name] = (common[name] || 0) + 1
-              const commonEnemies = Object.entries(common).sort((a,b)=>b[1]-a[1]).slice(0,6)
-              return `
-                <article class="depth-result-card">
-                  <div class="depth-result-head"><strong>Team ${Number(index)+1}</strong><span>${compactNumber(result.estimatedFloorLow)}–${compactNumber(result.estimatedFloorHigh)}</span></div>
-                  <div class="depth-result-loadout">${resultTeam.cards.map(card => `<span>${cardImage(card.cardName,'result-card-thumb')}<em>${esc(card.cardName)}</em></span>`).join('')}</div>
-                  <div class="depth-result-metrics">
-                    <div><span>Median Depth</span><b>${compactNumber(result.medianFloor)}</b></div>
-                    <div><span>Aura Packs</span><b>${compactNumber(result.auraPackLow)}–${compactNumber(result.auraPackHigh)}</b><small>Median ${compactNumber(result.auraPackMedian)}</small></div>
-                    <div><span>Clear Time</span><b>${durationLabel(result.estimatedSecondsMedian)}</b><small>${durationLabel(result.estimatedSecondsLow)}–${durationLabel(result.estimatedSecondsHigh)}</small></div>
-                    <div><span>Aura Cards / Hour</span><b>${compactNumber(result.auraCardsPerHour)}</b></div>
-                  </div>
-                  ${result.potionRewards ? `
-                    <div class="depth-rewards">
-                      <span>Jackpot Potion <b>${Number(result.potionRewards.median.jackpot.expected || 0).toFixed(2)} / run</b></span>
-                      <span>Rare Weather <b>${Number(result.potionRewards.median.rareWeather.expected || 0).toFixed(2)} / run</b></span>
-                    </div>
-                  ` : ''}
-                  <div class="result-meta">
-                    <span>${result.runs?.length || 0} runs</span>
-                    <span>${avgTurns.toFixed(1)} avg turns</span>
-                    <span>Low <b>${compactNumber(result.minFloor)}</b></span>
-                    <span>High <b>${compactNumber(result.maxFloor)}</b></span>
-                  </div>
-                  ${result.runs?.length ? `<div class="depth-floor-strip">${result.runs.map((run,runIndex) => `<button type="button" data-depth-run-detail="${index}:${runIndex}" title="${esc((run.endingEnemies || []).join(' / '))}">${compactNumber(run.deathFloor)}</button>`).join('')}</div>` : ''}
-                  ${commonEnemies.length ? `<div class="depth-common-enemies"><span>Most common losing-floor enemies</span><div>${commonEnemies.map(([name,count]) => `<i>${esc(name)} <b>×${count}</b></i>`).join('')}</div></div>` : ''}
-                  ${result.unsupportedAbilities?.length ? `<div class="tool-error">Unsupported: ${esc(result.unsupportedAbilities.join(', '))}</div>` : ''}
-                </article>
-              `
-            })()).join('')}
-          </div>
-        ` : '<div class="empty-state compact-empty"><h3>Build a team and run a test.</h3></div>'}
-      </div>
-    </section>
   `
 }
 
@@ -1211,7 +1245,7 @@ function render() {
       ${sidebar()}
       <main class="workspace">
         ${header()}
-        <div class="content ${route === 'depths' ? 'content-embedded' : ''}">${page()}</div>
+        <div class="content">${page()}</div>
       </main>
     </div>
     <div id="modalRoot"></div>
@@ -1704,6 +1738,7 @@ function bind() {
   let draggedDepthSlot = null
   document.querySelectorAll('[data-depth-slot]').forEach(button => {
     button.addEventListener('dragstart', event => {
+      if (event.target.closest('[data-depth-border-slot],[data-depth-mutation-slot]')) { event.preventDefault(); return }
       draggedDepthSlot = Number(button.dataset.depthSlot)
       button.classList.add('dragging')
       event.dataTransfer?.setData('text/plain', String(draggedDepthSlot))
@@ -1734,7 +1769,8 @@ function bind() {
     })
   })
 
-  document.querySelectorAll('[data-depth-slot]').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('[data-depth-slot]').forEach(button => button.addEventListener('click', event => {
+    if (event.target.closest('[data-depth-border-slot],[data-depth-mutation-slot]')) return
     updateDepthsToolState(state => { state.activeSlot = Number(button.dataset.depthSlot) })
   }))
   document.querySelectorAll('[data-depth-card]').forEach(button => button.addEventListener('click', () => {
@@ -1745,22 +1781,34 @@ function bind() {
       slot.mutationWeather = ''
     })
   }))
-  document.querySelectorAll('[data-depth-border]').forEach(button => button.addEventListener('click', () => {
-    clearDepthResult(depthsToolState().activeTeam)
+  document.querySelectorAll('[data-depth-border-slot]').forEach(button => button.addEventListener('click', event => {
+    event.preventDefault()
+    event.stopPropagation()
+    const teamIndex = depthsToolState().activeTeam
+    clearDepthResult(teamIndex)
     updateDepthsToolState(state => {
-      const slot = state.teams[state.activeTeam].cards[state.activeSlot]
-      const border = button.dataset.depthBorder
+      const slotIndex = Number(button.dataset.depthBorderSlot)
+      const border = button.dataset.depthBorderName
+      const slot = state.teams[state.activeTeam].cards[slotIndex]
       slot.borders = slot.borders.includes(border) ? slot.borders.filter(value => value !== border) : [...slot.borders, border]
     })
   }))
-  document.querySelector('#depthMutation')?.addEventListener('change', event => {
+  document.querySelectorAll('[data-depth-mutation-slot]').forEach(select => select.addEventListener('change', event => {
+    event.stopPropagation()
     clearDepthResult(depthsToolState().activeTeam)
-    updateDepthsToolState(state => { state.teams[state.activeTeam].cards[state.activeSlot].mutationWeather = event.target.value })
-  })
-  document.querySelector('#depthStatAura')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].statAura = event.target.value }) })
-  document.querySelector('#depthStatBorder')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].statAuraBorder = event.target.value }) })
-  document.querySelector('#depthAbilityAura')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAura = event.target.value }) })
-  document.querySelector('#depthAbilityBorder')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAuraBorder = event.target.value }) })
+    updateDepthsToolState(state => {
+      const slotIndex = Number(select.dataset.depthMutationSlot)
+      state.teams[state.activeTeam].cards[slotIndex].mutationWeather = DEPTH_MUTATIONS.includes(select.value) ? select.value : ''
+    })
+  }))
+  document.querySelectorAll('[data-depth-aura-select]').forEach(select => select.addEventListener('change', () => {
+    clearDepthResult(depthsToolState().activeTeam)
+    updateDepthsToolState(state => { state.teams[state.activeTeam][select.dataset.depthAuraSelect] = select.value })
+  }))
+  document.querySelectorAll('[data-depth-aura-border-key]').forEach(button => button.addEventListener('click', () => {
+    clearDepthResult(depthsToolState().activeTeam)
+    updateDepthsToolState(state => { state.teams[state.activeTeam][button.dataset.depthAuraBorderKey] = button.dataset.depthAuraBorder })
+  }))
   document.querySelector('[data-depth-owned-toggle]')?.addEventListener('click', () => updateDepthsToolState(state => { state.ownedOnly = !state.ownedOnly }))
   const depthSearch = document.querySelector('#depthSearch')
   if (depthSearch) depthSearch.oninput = () => {
@@ -1772,7 +1820,7 @@ function bind() {
       next?.setSelectionRange(next.value.length, next.value.length)
     })
   }
-  document.querySelector('#depthRuns')?.addEventListener('change', event => updateDepthsToolState(state => { state.runs = Number(event.target.value) }))
+  document.querySelectorAll('[data-depth-runs]').forEach(button => button.addEventListener('click', () => updateDepthsToolState(state => { state.runs = Number(button.dataset.depthRuns) })))
   document.querySelector('#depthStartFloor')?.addEventListener('change', event => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.startFloor = Math.min(40000, Math.max(1, Math.floor(Number(event.target.value)||1))) }) })
   document.querySelector('#depthStructureLevel')?.addEventListener('change', event => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.battleSpeedStructureLevel = Number(event.target.value)||0 }) })
   document.querySelector('#depthSkillLevel')?.addEventListener('change', event => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.skillTreeBattleSpeedLevel = Number(event.target.value)||0 }) })
