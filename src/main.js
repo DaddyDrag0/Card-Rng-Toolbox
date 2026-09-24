@@ -63,7 +63,6 @@ function header() {
   return `
     <header class="topbar">
       <div><p class="kicker">CARD RNG EXPANSION</p><h1>${esc(tool.name)}</h1></div>
-      <button class="secondary small" data-action="import-json">Import JSON</button>
     </header>
   `
 }
@@ -81,10 +80,6 @@ function dashboardPage() {
       <p class="kicker">TOOLBOX</p>
       <h2>Card RNG Toolbox</h2>
       <p>All tools use the same player data.</p>
-      <div class="intro-actions">
-        <button class="primary" data-action="import-json">Import Player JSON</button>
-        <button class="secondary" data-route="player">Player Data</button>
-      </div>
     </section>
 
     <section class="metrics">
@@ -93,7 +88,21 @@ function dashboardPage() {
       ${metric('Player Data', profile.import.importedAt ? 'Loaded' : 'Not Loaded')}
     </section>
 
-    <div class="section-head"><div><p class="kicker">TOOLS</p><h2>All Tools</h2></div></div>
+    <section class="panel data-manager">
+      <div class="panel-head">
+        <div><p class="kicker">PLAYER DATA</p><h3>${profile.import.importedAt ? 'JSON Connected' : 'Import Player JSON'}</h3></div>
+        <button class="primary" data-action="import-json">${profile.import.importedAt ? 'Update JSON' : 'Import JSON'}</button>
+      </div>
+      <div class="panel-body data-manager-body">
+        <div>
+          <b>${profile.import.importedAt ? 'Saved to this browser' : 'No player data loaded'}</b>
+          <span>${profile.import.importedAt ? 'Every tool uses this same saved profile.' : 'Import once here. Inventory and every tool will use the same data.'}</span>
+        </div>
+        <small>${profile.import.importedAt ? 'Last updated ' + new Date(profile.import.importedAt).toLocaleString() : 'You can replace it later with Update JSON.'}</small>
+      </div>
+    </section>
+
+    <div class="section-head tools-head"><div><p class="kicker">TOOLS</p><h2>All Tools</h2></div></div>
     <section class="tool-grid">
       ${tools.filter(tool => tool.id !== 'dashboard').map(tool => `
         <button class="tool-card" data-route="${tool.id}">
@@ -143,10 +152,10 @@ function playerPage() {
       </section>
 
       <section class="panel">
-        <div class="panel-head"><div><p class="kicker">IMPORT</p><h3>Player JSON</h3></div></div>
+        <div class="panel-head"><div><p class="kicker">PLAYER DATA</p><h3>${profile.import.importedAt ? 'Connected' : 'Not Loaded'}</h3></div></div>
         <div class="panel-body">
-          <p class="muted">Paste the exported player JSON here for now.</p>
-          <button class="primary full" data-action="import-json">Import JSON</button>
+          <p class="muted">${profile.import.importedAt ? 'This profile is using the shared JSON saved from the Dashboard.' : 'Import your JSON once from the Dashboard.'}</p>
+          <button class="secondary full" data-route="dashboard">Open Dashboard</button>
         </div>
       </section>
     </div>
@@ -179,7 +188,7 @@ function inventoryPage() {
     <section class="panel">
       <div class="panel-head">
         <div><p class="kicker">CARDS</p><h3>Owned Cards</h3></div>
-        <button class="secondary small" data-action="import-json">Import JSON</button>
+
       </div>
       <div class="panel-body no-pad">
         ${rows.length ? `
@@ -188,7 +197,7 @@ function inventoryPage() {
             ${rows.map(row => `<div class="inventory-row"><strong>${esc(row.name)}</strong><span>${esc(row.detail || 'Base')}</span><b>×${esc(row.quantity)}</b></div>`).join('')}
           </div>
         ` : `
-          <div class="empty-state"><h3>No card data</h3><p>Import player JSON to load inventory.</p><button class="primary" data-action="import-json">Import JSON</button></div>
+          <div class="empty-state"><h3>No card data</h3><p>Import player JSON from the Dashboard to load inventory.</p><button class="secondary" data-route="dashboard">Open Dashboard</button></div>
         `}
       </div>
     </section>
@@ -217,13 +226,14 @@ function page() {
 }
 
 function modal() {
+  const updating = Boolean(activeProfile().import.importedAt)
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <div class="modal" role="dialog" aria-modal="true" aria-label="Import player JSON" onclick="event.stopPropagation()">
-        <div class="modal-head"><div><p class="kicker">PLAYER IMPORT</p><h2>Paste JSON</h2></div><button class="icon-btn" data-action="close-modal">×</button></div>
+      <div class="modal" role="dialog" aria-modal="true" aria-label="${updating ? 'Update' : 'Import'} player JSON" onclick="event.stopPropagation()">
+        <div class="modal-head"><div><p class="kicker">PLAYER DATA</p><h2>${updating ? 'Update JSON' : 'Import JSON'}</h2></div><button class="icon-btn" data-action="close-modal">×</button></div>
         <textarea id="jsonInput" spellcheck="false" placeholder='{"username":"Player","cards":[...]}'></textarea>
         <div id="importError" class="form-error"></div>
-        <div class="modal-actions"><button class="secondary" data-action="close-modal">Cancel</button><button class="primary" data-action="save-json">Import</button></div>
+        <div class="modal-actions"><button class="secondary" data-action="close-modal">Cancel</button><button class="primary" data-action="save-json">${updating ? 'Update' : 'Import'}</button></div>
       </div>
     </div>
   `
@@ -261,7 +271,7 @@ function saveJson() {
     const parsed = JSON.parse(input.value)
     store.replaceProfile(normalizeImportedJson(parsed, activeProfile()))
     closeModal()
-    routeTo('inventory')
+    routeTo('dashboard')
   } catch (err) {
     if (error) error.textContent = err instanceof Error ? err.message : 'Invalid JSON'
   }
