@@ -5,11 +5,31 @@ import { tools, toolById } from './core/tools.js'
 const app = document.querySelector('#app')
 let route = location.hash.replace(/^#\/?/, '') || 'dashboard'
 let cardCatalog = []
+let auraCatalog = []
 let libraryQuery = ''
+let deckInventoryQuery = ''
+let deckWorker = null
+let deckProgress = null
+let deckResults = []
+let deckError = ''
+let towerWorker = null
+let towerRequestId = 0
+let towerFloor = 105
+let towerDifficulty = 'Impossible'
+let towerEnemies = ["Heaven's Armor","Hell's Army",'Judgment Day','Sable The Envious']
+let towerOwnedOnly = true
+let towerProgress = null
+let towerResult = null
+let towerError = ''
 
-fetch('./src/data/cards.json?v=1', { cache: 'no-store' })
+fetch('./src/data/cards.json?v=2', { cache: 'no-store' })
   .then(response => response.ok ? response.json() : [])
   .then(cards => { cardCatalog = Array.isArray(cards) ? cards : []; if (route === 'library') render() })
+  .catch(() => {})
+
+fetch('./src/data/auras.json?v=1', { cache: 'no-store' })
+  .then(response => response.ok ? response.json() : [])
+  .then(auras => { auraCatalog = Array.isArray(auras) ? auras : []; if (route === 'deck-helper') render() })
   .catch(() => {})
 
 try { localStorage.setItem('crx-site-theme', 'slate') } catch {}
@@ -283,36 +303,323 @@ function normalizeOwnedCards(cards) {
   return list
 }
 
-function syncExternalTools(profile) {
-  if (!profile?.import?.importedAt) return
-  try {
-    const existing = JSON.parse(localStorage.getItem('deckhelper.state.v1') || 'null') || {}
-    existing.inventory = existing.inventory || { cards: [], statAuras: [], abilityAuras: [] }
-    existing.inventory.cards = normalizeOwnedCards(profile.game.cards)
-    if (!Array.isArray(existing.inventory.statAuras)) existing.inventory.statAuras = []
-    if (!Array.isArray(existing.inventory.abilityAuras)) existing.inventory.abilityAuras = []
-    if (!Array.isArray(existing.depthBans)) existing.depthBans = []
-    if (!Array.isArray(existing.favorites)) existing.favorites = []
-    if (!existing.currentDeck) existing.currentDeck = { cards: [], statAura: null, abilityAura: null }
-    localStorage.setItem('deckhelper.state.v1', JSON.stringify(existing))
-  } catch {}
-  try { localStorage.setItem('crx-site-theme', 'slate') } catch {}
+function cardVariantKey(card) {
+  return [card.cardName, [...(card.borders || [])].sort().join('+'), card.mutationWeather || ''].join('|')
 }
 
-function embeddedToolPage(tool) {
-  syncExternalTools(activeProfile())
-  const src = tool.id === 'deck-helper'
-    ? '/DeckHelper/'
-    : tool.id === 'tower'
-      ? '/CardRngExpansionDepths/?view=tower'
-      : '/CardRngExpansionDepths/'
+function deckToolState() {
+  return store.get().toolState?.deckHelper?.[activeProfile().id] || { initialized: false, selected: [], locks: {} }
+}
+
+function updateDeckToolState(next) {
+  const profileId = activeProfile().id
+  store.update(draft => {
+    if (!draft.toolState.deckHelper) draft.toolState.deckHelper = {}
+    const current = draft.toolState.deckHelper[profileId] || { initialized: false, selected: [], locks: {} }
+    draft.toolState.deckHelper[profileId] = { ...current, ...next }
+  })
+}
+
+function defaultDeckSelection(cards) {
+  const byName = new Map(cardCatalog.map(card => [card.name, card]))
+  const ordered = [...cards].sort((a, b) => {
+    const ar = Number(byName.get(a.cardName)?.rarity || 0)
+    const br = Number(byName.get(b.cardName)?.rarity || 0)
+    return br - ar || a.cardName.localeCompare(b.cardName)
+  })
+  const selected = []
+  let copies = 0
+  for (const card of ordered) {
+    const qty = Math.max(1, Math.min(30, Number(card.quantity) || 1))
+    if (copies + qty > 30) continue
+    selected.push(cardVariantKey(card))
+    copies += qty
+    if (copies >= 30) break
+  }
+  return selected
+}
+
+function selectedDeckCards() {
+  const cards = normalizeOwnedCards(activeProfile().game.cards)
+  const state = deckToolState()
+  const validKeys = new Set(cards.map(cardVariantKey))
+  const selectedKeys = state.initialized
+    ? state.selected.filter(key => validKeys.has(key))
+    : defaultDeckSelection(cards)
+  const selected = new Set(selectedKeys)
+  return { cards, selected, state }
+}
+
+function normalizeOwnedAuras(value) {
+  const auraByName = new Map(auraCatalog.map(aura => [aura.name, aura]))
+  const raw = []
+  if (Array.isArray(value)) raw.push(...value)
+  else if (value && typeof value === 'object') {
+    for (const [name, entry] of Object.entries(value)) {
+      if (entry === false || entry === 0 || entry == null) continue
+      raw.push(typeof entry === 'object' ? { name, ...entry } : { name })
+    }
+  }
+  const statAuras = []
+  const abilityAuras = []
+  const seen = new Set()
+  for (const item of raw) {
+    const name = String(item?.auraName || item?.name || item?.Name || '')
+    if (!name || seen.has(name) || !auraByName.has(name)) continue
+    seen.add(name)
+    const definition = auraByName.get(name)
+    const borderValues = Array.isArray(item?.borders) ? item.borders : [item?.border].filter(Boolean)
+    const allowed = ['Base','Platinum','Crystal','Galaxy']
+    const borders = borderValues.filter(border => allowed.includes(border))
+    const owned = { auraName: name, borders: borders.length ? borders : ['Base'], locked: false }
+    if (definition.type === 'Stat') statAuras.push(owned)
+    else if (definition.type === 'Skill') abilityAuras.push(owned)
+  }
+  return { statAuras, abilityAuras }
+}
+
+function deckWorkerInventory() {
+  const { cards, selected, state } = selectedDeckCards()
+  const locks = state.locks || {}
+  const selectedCards = cards.filter(card => selected.has(cardVariantKey(card))).map(card => {
+    const key = cardVariantKey(card)
+    const position = Number.isInteger(locks[key]) && locks[key] >= 0 && locks[key] <= 3 ? locks[key] : null
+    return {
+      ...card,
+      quantity: Math.max(1, Math.min(30, Number(card.quantity) || 1)),
+      locked: position !== null,
+      lockedPosition: position,
+    }
+  })
+  const auras = normalizeOwnedAuras(activeProfile().game.auras)
+  return { cards: selectedCards, ...auras }
+}
+
+function deckHelperPage() {
+  const profile = activeProfile()
+  const { cards, selected, state } = selectedDeckCards()
+  const query = deckInventoryQuery.trim().toLowerCase()
+  const visible = cards.filter(card => !query || card.cardName.toLowerCase().includes(query))
+  const selectedCards = cards.filter(card => selected.has(cardVariantKey(card)))
+  const selectedCopies = selectedCards.reduce((sum, card) => sum + Math.max(1, Number(card.quantity) || 1), 0)
+  const importedAuras = normalizeOwnedAuras(profile.game.auras)
+  const progress = deckProgress
+  return `
+    <section class="page-intro">
+      <p class="kicker">DECK TOOL</p>
+      <h2>Deck Helper</h2>
+      <p>Uses your shared Toolbox inventory and the Depths battle engine.</p>
+    </section>
+
+    ${!profile.import.importedAt ? `
+      <section class="panel tool-warning">
+        <div><strong>No player JSON loaded.</strong><span>Import your player data from the Dashboard first.</span></div>
+        <button class="secondary" data-route="dashboard">Dashboard</button>
+      </section>
+    ` : ''}
+
+    <div class="deck-layout">
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="kicker">INVENTORY</p><h3>Optimizer Pool</h3></div>
+          <b class="selection-count">${selectedCopies}/30 copies</b>
+        </div>
+        <div class="panel-body">
+          <input id="deckInventorySearch" class="search-input" value="${esc(deckInventoryQuery)}" placeholder="Search owned cards…" autocomplete="off">
+          <div class="deck-owned-list">
+            ${visible.length ? visible.map(card => {
+              const key = cardVariantKey(card)
+              const on = selected.has(key)
+              const lock = Number.isInteger(state.locks?.[key]) ? state.locks[key] : -1
+              return `
+                <div class="deck-owned-row ${on ? 'selected' : ''}">
+                  <button class="deck-select" data-deck-toggle="${esc(key)}" title="${on ? 'Remove from optimizer' : 'Add to optimizer'}">
+                    <i>${on ? '✓' : '+'}</i>
+                    <span><strong>${esc(card.cardName)}</strong><small>${esc((card.borders || []).join(' + ') || card.mutationWeather || 'Base')} · ×${card.quantity}</small></span>
+                  </button>
+                  ${on ? `
+                    <select data-deck-lock="${esc(key)}" title="Lock position">
+                      <option value="-1" ${lock < 0 ? 'selected' : ''}>Auto</option>
+                      ${[0,1,2,3].map(pos => `<option value="${pos}" ${lock === pos ? 'selected' : ''}>Slot ${pos + 1}</option>`).join('')}
+                    </select>
+                  ` : ''}
+                </div>
+              `
+            }).join('') : '<div class="empty-state"><h3>No owned cards found</h3></div>'}
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><p class="kicker">SEARCH</p><h3>Find Best Deck</h3></div></div>
+        <div class="panel-body deck-search-panel">
+          <div class="deck-facts">
+            <div><span>Selected</span><b>${selectedCopies}</b></div>
+            <div><span>Stat Auras</span><b>${importedAuras.statAuras.length}</b></div>
+            <div><span>Skill Auras</span><b>${importedAuras.abilityAuras.length}</b></div>
+          </div>
+          ${deckError ? `<div class="tool-error">${esc(deckError)}</div>` : ''}
+          ${progress ? `
+            <div class="search-progress">
+              <div><strong>${esc(progress.message || progress.phase || 'Searching…')}</strong><span>${Number(progress.simulations || 0).toLocaleString()} simulations</span></div>
+              <div class="progress-track"><i style="width:${Math.min(100, Math.round(((progress.fullySimulated || progress.quickTested || 0) / Math.max(1, progress.fullySimulatedTotal || progress.possibleCombinations || 1)) * 100))}%"></i></div>
+            </div>
+          ` : ''}
+          <div class="tool-actions">
+            ${deckWorker
+              ? '<button class="secondary" data-deck-cancel>Cancel</button>'
+              : `<button class="primary" data-deck-search ${selectedCopies < 4 || selectedCopies > 30 ? 'disabled' : ''}>Find Best Deck</button>`}
+          </div>
+          <small class="tool-note">Choose up to 30 total card copies. Slot locks are optional.</small>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel native-results">
+      <div class="panel-head"><div><p class="kicker">RESULTS</p><h3>${deckResults.length ? 'Best Decks' : 'No search yet'}</h3></div></div>
+      <div class="panel-body">
+        ${deckResults.length ? `
+          <div class="result-list">
+            ${deckResults.slice(0,10).map((result,index) => `
+              <article class="native-result-card">
+                <div class="result-rank">#${index + 1}</div>
+                <div class="result-main">
+                  <div class="result-cards">${result.loadout.cards.map((card,pos) => `<span><b>${pos+1}</b>${esc(card.cardName)}</span>`).join('')}</div>
+                  <div class="result-meta">
+                    <span>Median <b>${Math.round(result.metrics.medianDepth).toLocaleString()}</b></span>
+                    <span>Average <b>${Math.round(result.metrics.averageDepth).toLocaleString()}</b></span>
+                    <span>Low <b>${Math.round(result.metrics.minimumDepth).toLocaleString()}</b></span>
+                    <span>Aura <b>${esc(result.loadout.abilityAura?.auraName || result.loadout.statAura?.auraName || 'None')}</b></span>
+                  </div>
+                </div>
+              </article>
+            `).join('')}
+          </div>
+        ` : '<div class="empty-state compact-empty"><h3>Run the optimizer to see results.</h3></div>'}
+      </div>
+    </section>
+  `
+}
+
+const TOWER_FIXED = {
+  5:['Good Boy','Good Boy','Good Boy','Shining Armor'],
+  10:['Sorcerer','Sorcerer','Trainee','Trainee'],
+  15:['Chronus The Hoarder','Greedy Belly','Greedy Belly','Arthur of Excalibur'],
+  20:['Demon Hunter','Gunslinger','Stone Scientist','Darling'],
+  25:['Black Cat','Black Cat','Black Cat','Black Cat'],
+  30:['Crown Prince','Three-Legged Golden Crow','Leviathan','Malik The Sovereign'],
+  35:['Ice Queen','Kitsune','A0-ON1','AK4-ON1'],
+  40:['Zeus','Arcane Avian','Zeus','Arcane Avian'],
+  45:['Frankenstein','Phoenix','Phoenix','Gideon The Insatiable'],
+  50:['Admiral Ice','Ice Queen','Hoarfrost Phoenix','Ice Queen'],
+  55:['Boreas','Wind Spirit','Wind Spirit','Wind Spirit'],
+  60:['Bad Boys','Poseidon','Hades','Lilith The Enchantress'],
+  65:['Astraeus','Astraeus','Astraeus','Astraeus'],
+  70:['Cronus','Ixion','Cronus','Sciron'],
+  75:['Deus Ex','Bad Boys','Bad Boys','Morpheus The Slumberer'],
+  80:['Mastermind','Domain Master','Kira','Priest'],
+  85:['Savior','Lucifer','Lucifer','Lucifer'],
+  90:['Gilgamesh','Ragon','Fafnir','Raze The Destroyer'],
+  95:['Shu','Sekhmet','Set','Ra'],
+  100:['Shuten-dōji','Susanoo','Tsukuyomi','Amaterasu'],
+  105:["Heaven's Armor","Hell's Army",'Judgment Day','Sable The Envious']
+}
+const CHEESE_POOL = ['Judgment Day','Robin Hood','Parallax','Piccolo','Pandora','Kuchisake-onna','Fate Seamstress','Kira',"Hell's Army",'Noveau Riche']
+
+function ownedCardNames() {
+  return new Set(normalizeOwnedCards(activeProfile().game.cards).map(card => card.cardName))
+}
+
+function ownedAuraNames() {
+  const auras = normalizeOwnedAuras(activeProfile().game.auras)
+  return new Set([...auras.statAuras, ...auras.abilityAuras].map(aura => aura.auraName))
+}
+
+function towerPage() {
+  const fixed = TOWER_FIXED[towerFloor]
+  const hasPlayerData = Boolean(activeProfile().import.importedAt)
+  const owned = ownedCardNames()
+  return `
+    <section class="page-intro">
+      <p class="kicker">TOWER</p>
+      <h2>Tower Cheese Maker</h2>
+      <p>Native Tower search using the shared battle engine.</p>
+    </section>
+
+    <section class="panel tower-native">
+      <div class="panel-head">
+        <div><p class="kicker">ENEMIES</p><h3>Tower Floor</h3></div>
+        <span class="panel-count">${fixed ? 'Preset floor' : 'Custom lineup'}</span>
+      </div>
+      <div class="panel-body">
+        <div class="tower-control-grid">
+          <label><span>Floor</span><input id="towerFloorInput" type="number" min="1" value="${towerFloor}"></label>
+          <label><span>Difficulty</span><select id="towerDifficultyInput">${['Normal','Hard','Extreme','Hell','Impossible'].map(name => `<option ${towerDifficulty===name?'selected':''}>${name}</option>`).join('')}</select></label>
+          <label class="tower-owned-toggle"><span>Player Inventory</span><button type="button" data-tower-owned class="${towerOwnedOnly ? 'on' : ''}" ${!hasPlayerData ? 'disabled' : ''}>${hasPlayerData ? (towerOwnedOnly ? 'OWNED ONLY' : 'ALL CHEESE CARDS') : 'NO JSON'}</button></label>
+        </div>
+        <datalist id="towerCardNames">${cardCatalog.filter(card => !card.unobtainable).map(card => `<option value="${esc(card.name)}"></option>`).join('')}</datalist>
+        <div class="tower-enemy-grid">
+          ${towerEnemies.map((name,index) => {
+            const card = cardCatalog.find(item => item.name === name)
+            return `
+              <label class="tower-enemy-box">
+                <span>Enemy ${index + 1}</span>
+                <input data-tower-enemy="${index}" list="towerCardNames" value="${esc(name)}">
+                <small>${esc(card?.ability || 'Unknown ability')}</small>
+              </label>
+            `
+          }).join('')}
+        </div>
+        ${towerError ? `<div class="tool-error">${esc(towerError)}</div>` : ''}
+        ${towerProgress ? `
+          <div class="search-progress tower-search-progress">
+            <div><strong>${esc(towerProgress.phase || 'Searching…')}</strong><span>${Number(towerProgress.battleSimulations || 0).toLocaleString()} battles</span></div>
+            <div class="progress-track"><i style="width:${Math.min(100, Math.round((Number(towerProgress.completed || 0) / Math.max(1, Number(towerProgress.total || 1))) * 100))}%"></i></div>
+          </div>
+        ` : ''}
+        <div class="tool-actions right">
+          ${towerWorker
+            ? '<button class="secondary" data-tower-cancel>Cancel</button>'
+            : '<button class="primary" data-tower-search>Deep Search</button>'}
+        </div>
+        ${hasPlayerData && towerOwnedOnly ? `<small class="tool-note">Search pool is limited to cheese cards found in the active player JSON. ${[...owned].length} unique owned cards detected.</small>` : ''}
+      </div>
+    </section>
+
+    <section class="panel native-results">
+      <div class="panel-head"><div><p class="kicker">RESULTS</p><h3>${towerResult?.recommendations?.length ? 'Cheese Results' : 'No search yet'}</h3></div></div>
+      <div class="panel-body">
+        ${towerResult?.recommendations?.length ? `
+          <div class="result-list">
+            ${towerResult.recommendations.map((candidate,index) => `
+              <article class="native-result-card">
+                <div class="result-rank">#${index + 1}</div>
+                <div class="result-main">
+                  <div class="result-cards">${candidate.loadout.cards.map((card,pos) => `<span><b>${pos+1}</b>${esc(card.cardName)}</span>`).join('')}</div>
+                  <div class="result-meta">
+                    <span>Win Rate <b>${(candidate.winRate * 100).toFixed(1)}%</b></span>
+                    <span>Progress <b>${(candidate.progress * 100).toFixed(1)}%</b></span>
+                    <span>Runs <b>${Number(candidate.runs).toLocaleString()}</b></span>
+                    <span>Aura <b>${esc(candidate.loadout.abilityAura?.auraName || 'None')}</b></span>
+                  </div>
+                </div>
+              </article>
+            `).join('')}
+          </div>
+        ` : '<div class="empty-state compact-empty"><h3>Enter the enemy lineup and run Deep Search.</h3></div>'}
+      </div>
+    </section>
+  `
+}
+
+function depthsPage() {
   return `
     <section class="embedded-wrap">
       <div class="embedded-bar">
-        <div><p class="kicker">${tool.id === 'deck-helper' ? 'DECK TOOL' : 'SIMULATOR'}</p><strong>${esc(tool.name)}</strong></div>
-        <a class="secondary small" href="${src}" target="_blank" rel="noopener">Open Full Screen</a>
+        <div><p class="kicker">DEPTHS</p><strong>Depths Calculator</strong></div>
+        <a class="secondary small" href="/CardRngExpansionDepths/" target="_blank" rel="noopener">Open Full Screen</a>
       </div>
-      <iframe class="tool-frame" src="${src}" title="${esc(tool.name)}" allow="clipboard-read; clipboard-write"></iframe>
+      <iframe class="tool-frame" src="/CardRngExpansionDepths/" title="Depths Calculator" allow="clipboard-read; clipboard-write"></iframe>
     </section>
   `
 }
@@ -357,7 +664,9 @@ function page() {
   if (route === 'player') return playerPage()
   if (route === 'inventory') return inventoryPage()
   if (route === 'library') return cardLibraryPage()
-  if (['deck-helper','depths','tower'].includes(route)) return embeddedToolPage(toolById(route))
+  if (route === 'deck-helper') return deckHelperPage()
+  if (route === 'depths') return depthsPage()
+  if (route === 'tower') return towerPage()
   if (route === 'calculators') return calculatorsPage()
   return ''
 }
@@ -382,7 +691,7 @@ function render() {
       ${sidebar()}
       <main class="workspace">
         ${header()}
-        <div class="content ${['deck-helper','depths','tower'].includes(route) ? 'content-embedded' : ''}">${page()}</div>
+        <div class="content ${route === 'depths' ? 'content-embedded' : ''}">${page()}</div>
       </main>
     </div>
     <div id="modalRoot"></div>
@@ -408,12 +717,143 @@ function saveJson() {
     const parsed = JSON.parse(input.value)
     const profile = normalizeImportedJson(parsed, activeProfile())
     store.replaceProfile(profile)
-    syncExternalTools(profile)
     closeModal()
     routeTo('dashboard')
   } catch (err) {
     if (error) error.textContent = err instanceof Error ? err.message : 'Invalid JSON'
   }
+}
+
+function cancelDeckSearch() {
+  if (deckWorker) deckWorker.terminate()
+  deckWorker = null
+  deckProgress = null
+  render()
+}
+
+function startDeckSearch() {
+  const inventory = deckWorkerInventory()
+  const copies = inventory.cards.reduce((sum, card) => sum + card.quantity, 0)
+  if (copies < 4) {
+    deckError = 'Select at least 4 card copies.'
+    render()
+    return
+  }
+  deckError = ''
+  deckResults = []
+  deckProgress = { phase: 'prepare', message: 'Starting search…', simulations: 0, possibleCombinations: 1 }
+  deckWorker = new Worker('./assets/optimizer-worker.js?v=1')
+  deckWorker.onmessage = event => {
+    const message = event.data || {}
+    if (message.type === 'progress') {
+      deckProgress = message.progress
+      if (route === 'deck-helper') render()
+      return
+    }
+    if (message.type === 'search-result') {
+      deckResults = Array.isArray(message.results) ? message.results : []
+      deckProgress = null
+      deckWorker?.terminate()
+      deckWorker = null
+      if (route === 'deck-helper') render()
+      return
+    }
+    if (message.type === 'error') {
+      deckError = message.message || 'Deck search failed.'
+      deckProgress = null
+      deckWorker?.terminate()
+      deckWorker = null
+      if (route === 'deck-helper') render()
+    }
+  }
+  deckWorker.onerror = event => {
+    deckError = event.message || 'Deck search worker failed.'
+    deckProgress = null
+    deckWorker?.terminate()
+    deckWorker = null
+    if (route === 'deck-helper') render()
+  }
+  deckWorker.postMessage({
+    type: 'run',
+    request: {
+      kind: 'search',
+      inventory,
+      bannedCardNames: [],
+      settings: { mode: 'full', maxFloor: 100000 },
+    },
+  })
+  render()
+}
+
+function cancelTowerSearch() {
+  if (towerWorker) towerWorker.terminate()
+  towerWorker = null
+  towerProgress = null
+  render()
+}
+
+function startTowerSearch() {
+  const known = new Set(cardCatalog.map(card => card.name))
+  if (towerEnemies.length !== 4 || towerEnemies.some(name => !known.has(name))) {
+    towerError = 'Choose four valid Tower enemies.'
+    render()
+    return
+  }
+
+  const owned = ownedCardNames()
+  let excludedCards = []
+  if (activeProfile().import.importedAt && towerOwnedOnly) {
+    excludedCards = CHEESE_POOL.filter(name => !owned.has(name))
+    if (excludedCards.length === CHEESE_POOL.length) {
+      towerError = 'None of the standard cheese cards were found in this player JSON.'
+      render()
+      return
+    }
+  }
+
+  const hasEndTimes = !activeProfile().import.importedAt || !towerOwnedOnly || ownedAuraNames().has('End Times')
+  towerError = ''
+  towerResult = null
+  towerProgress = { phase: 'exhaustive', completed: 0, total: 1, battleSimulations: 0 }
+  const requestId = ++towerRequestId
+  towerWorker = new Worker('./assets/tower-worker.js?v=1')
+  towerWorker.onmessage = event => {
+    const message = event.data || {}
+    if (message.id !== requestId) return
+    if (message.kind === 'tower-cheese-progress') {
+      towerProgress = message
+      if (route === 'tower') render()
+      return
+    }
+    if (message.kind === 'tower-cheese-result') {
+      if (message.ok) towerResult = message.result
+      else towerError = message.error || 'Tower search failed.'
+      towerProgress = null
+      towerWorker?.terminate()
+      towerWorker = null
+      if (route === 'tower') render()
+    }
+  }
+  towerWorker.onerror = event => {
+    towerError = event.message || 'Tower search worker failed.'
+    towerProgress = null
+    towerWorker?.terminate()
+    towerWorker = null
+    if (route === 'tower') render()
+  }
+  towerWorker.postMessage({
+    id: requestId,
+    kind: 'tower-cheese-search',
+    enemyNames: [...towerEnemies],
+    floor: towerFloor,
+    difficulty: towerDifficulty,
+    seed: Date.now() >>> 0,
+    intensive: true,
+    excludedCards,
+    addedCards: [],
+    hasEndTimes,
+  })
+  render()
 }
 
 function updateRollCalculator() {
@@ -446,7 +886,6 @@ function bind() {
   document.querySelectorAll('[data-action="save-json"]').forEach(button => button.onclick = saveJson)
   document.querySelectorAll('[data-profile-id]').forEach(button => button.onclick = () => {
     store.setActiveProfile(button.dataset.profileId)
-    syncExternalTools(activeProfile())
     render()
   })
   document.querySelectorAll('[data-action="new-profile"]').forEach(button => button.onclick = () => {
@@ -465,6 +904,76 @@ function bind() {
     })
   }
 
+  const deckSearch = document.querySelector('#deckInventorySearch')
+  if (deckSearch) deckSearch.oninput = () => {
+    deckInventoryQuery = deckSearch.value
+    render()
+    requestAnimationFrame(() => {
+      const next = document.querySelector('#deckInventorySearch')
+      next?.focus()
+      next?.setSelectionRange(next.value.length, next.value.length)
+    })
+  }
+  document.querySelectorAll('[data-deck-toggle]').forEach(button => button.onclick = () => {
+    if (deckWorker) return
+    const { cards, selected, state } = selectedDeckCards()
+    const key = button.dataset.deckToggle
+    const card = cards.find(item => cardVariantKey(item) === key)
+    if (!card) return
+    const next = new Set(selected)
+    if (next.has(key)) next.delete(key)
+    else {
+      const currentCopies = cards.filter(item => next.has(cardVariantKey(item))).reduce((sum,item) => sum + Math.max(1, Number(item.quantity)||1), 0)
+      const addCopies = Math.max(1, Number(card.quantity)||1)
+      if (currentCopies + addCopies > 30) {
+        deckError = 'Deck Helper supports up to 30 selected card copies.'
+        render()
+        return
+      }
+      next.add(key)
+    }
+    deckError = ''
+    updateDeckToolState({ initialized: true, selected: [...next], locks: state.locks || {} })
+  })
+  document.querySelectorAll('[data-deck-lock]').forEach(select => select.onchange = () => {
+    const state = deckToolState()
+    const locks = { ...(state.locks || {}) }
+    const value = Number(select.value)
+    if (value >= 0 && value <= 3) {
+      for (const key of Object.keys(locks)) if (locks[key] === value) delete locks[key]
+      locks[select.dataset.deckLock] = value
+    } else delete locks[select.dataset.deckLock]
+    updateDeckToolState({ initialized: true, selected: [...selectedDeckCards().selected], locks })
+  })
+  document.querySelector('[data-deck-search]')?.addEventListener('click', startDeckSearch)
+  document.querySelector('[data-deck-cancel]')?.addEventListener('click', cancelDeckSearch)
+
+  const floorInput = document.querySelector('#towerFloorInput')
+  floorInput?.addEventListener('change', () => {
+    towerFloor = Math.max(1, Math.floor(Number(floorInput.value) || 1))
+    if (TOWER_FIXED[towerFloor]) towerEnemies = [...TOWER_FIXED[towerFloor]]
+    towerResult = null
+    towerError = ''
+    render()
+  })
+  document.querySelector('#towerDifficultyInput')?.addEventListener('change', event => {
+    towerDifficulty = event.target.value
+    towerResult = null
+  })
+  document.querySelectorAll('[data-tower-enemy]').forEach(input => input.addEventListener('change', () => {
+    towerEnemies[Number(input.dataset.towerEnemy)] = input.value.trim()
+    towerResult = null
+    towerError = ''
+    render()
+  }))
+  document.querySelector('[data-tower-owned]')?.addEventListener('click', () => {
+    towerOwnedOnly = !towerOwnedOnly
+    towerResult = null
+    render()
+  })
+  document.querySelector('[data-tower-search]')?.addEventListener('click', startTowerSearch)
+  document.querySelector('[data-tower-cancel]')?.addEventListener('click', cancelTowerSearch)
+
   document.querySelector('#rollSpeedBonus')?.addEventListener('input', updateRollCalculator)
   document.querySelector('#towerCalcFloor')?.addEventListener('input', updateTowerCalculator)
   document.querySelector('#towerCalcDifficulty')?.addEventListener('change', updateTowerCalculator)
@@ -478,5 +987,4 @@ window.addEventListener('hashchange', () => {
 })
 
 store.subscribe(() => render())
-syncExternalTools(activeProfile())
 render()
