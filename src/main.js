@@ -321,7 +321,8 @@ function towerPower(floor, difficulty) {
   const ids = { Normal: 1, Hard: 2, Extreme: 3, Hell: 5, Impossible: 6 }
   const stage = Math.max(1, Math.floor(Number(floor) || 1))
   const stageValue = 6000 + Math.pow(stage, 3) * 50
-  return Math.ceil(2 * Math.sqrt(stageValue / 2) * Math.pow(4, ids[difficulty] || 1 - 1))
+  const difficultyId = ids[difficulty] || 1
+  return Math.ceil(2 * Math.sqrt(stageValue / 2) * Math.pow(4, difficultyId - 1))
 }
 
 function calculatorsPage() {
