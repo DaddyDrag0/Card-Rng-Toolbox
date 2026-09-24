@@ -6,7 +6,12 @@ const app = document.querySelector('#app')
 let route = location.hash.replace(/^#\/?/, '') || 'dashboard'
 let cardCatalog = []
 let auraCatalog = []
+let thumbnails = {}
 let libraryQuery = ''
+let librarySort = 'rarity-desc'
+let libraryWeather = ''
+let libraryPack = ''
+let libraryOwned = 'all'
 let deckInventoryQuery = ''
 let deckWorker = null
 let deckProgress = null
@@ -17,10 +22,14 @@ let towerRequestId = 0
 let towerFloor = 105
 let towerDifficulty = 'Impossible'
 let towerEnemies = ["Heaven's Armor","Hell's Army",'Judgment Day','Sable The Envious']
-let towerOwnedOnly = true
 let towerProgress = null
 let towerResult = null
 let towerError = ''
+let depthsQuery = ''
+let depthRequestId = 0
+const depthsWorkers = new Map()
+const depthsProgress = {}
+const depthsResults = {}
 
 fetch('./src/data/cards.json?v=2', { cache: 'no-store' })
   .then(response => response.ok ? response.json() : [])
@@ -32,11 +41,54 @@ fetch('./src/data/auras.json?v=1', { cache: 'no-store' })
   .then(auras => { auraCatalog = Array.isArray(auras) ? auras : []; if (route === 'deck-helper') render() })
   .catch(() => {})
 
+fetch('./src/data/thumbnails.json?v=1', { cache: 'no-store' })
+  .then(response => response.ok ? response.json() : {})
+  .then(data => { thumbnails = data && typeof data === 'object' ? data : {}; render() })
+  .catch(() => {})
+
 try { localStorage.setItem('crx-site-theme', 'slate') } catch {}
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[char]))
+
+function cardByName(name) {
+  return cardCatalog.find(card => card.name === name) || null
+}
+
+function cardImageUrl(nameOrCard) {
+  const card = typeof nameOrCard === 'string' ? cardByName(nameOrCard) : nameOrCard
+  if (!card) return ''
+  return thumbnails[String(card.imageAssetId)] || ''
+}
+
+function cardImage(nameOrCard, className = 'card-thumb') {
+  const card = typeof nameOrCard === 'string' ? cardByName(nameOrCard) : nameOrCard
+  const url = cardImageUrl(card)
+  if (!url) return `<span class="${className} card-thumb-fallback">?</span>`
+  return `<img class="${className}" src="${esc(url)}" alt="${esc(card?.name || '')}" loading="lazy">`
+}
+
+function baseCardStats(card) {
+  if (!card) return { power: 0, attack: 0, health: 0 }
+  const rarity = Math.max(1, Number(card.rarity) || 1)
+  const statMultiplier = Math.max(0, Number(card.statMultiplier) || 1)
+  const power = Math.pow(2, Math.log10(rarity)) * 10 * statMultiplier
+  return {
+    power,
+    attack: power / 2,
+    health: power * Math.max(0.01, Number(card.hpMultiplier) || 1),
+  }
+}
+
+function compactNumber(value) {
+  const number = Number(value) || 0
+  if (Math.abs(number) < 1000) return Math.round(number).toLocaleString()
+  const units = [['Qd',1e15],['T',1e12],['B',1e9],['M',1e6],['K',1e3]]
+  for (const [unit,size] of units) if (Math.abs(number) >= size) return (number / size).toFixed(number >= size * 10 ? 1 : 2).replace(/\.0+$/,'') + unit
+  return Math.round(number).toLocaleString()
+}
+
 
 function activeProfile() {
   return store.activeProfile()
@@ -220,7 +272,7 @@ function inventoryPage() {
         ${rows.length ? `
           <div class="inventory-table">
             <div class="inventory-head"><span>Card</span><span>Details</span><span>Qty</span></div>
-            ${rows.map(row => `<div class="inventory-row"><strong>${esc(row.name)}</strong><span>${esc(row.detail || 'Base')}</span><b>×${esc(row.quantity)}</b></div>`).join('')}
+            ${rows.map(row => `<div class="inventory-row"><div class="inventory-card-name">${cardImage(row.name,'card-thumb-sm')}<strong>${esc(row.name)}</strong></div><span>${esc(row.detail || 'Base')}</span><b>×${esc(row.quantity)}</b></div>`).join('')}
           </div>
         ` : `
           <div class="empty-state"><h3>No card data</h3><p>Import player JSON from the Dashboard to load inventory.</p><button class="secondary" data-route="dashboard">Open Dashboard</button></div>
@@ -232,10 +284,27 @@ function inventoryPage() {
 
 function cardLibraryPage() {
   const query = libraryQuery.trim().toLowerCase()
+  const ownedNames = ownedCardNames()
+  const weathers = [...new Set(cardCatalog.map(card => card.weather).filter(Boolean))].sort()
+  const packs = [...new Set(cardCatalog.map(card => card.pack).filter(Boolean))].sort()
+
+  const sorters = {
+    'rarity-desc': (a,b) => b.rarity - a.rarity || a.name.localeCompare(b.name),
+    'rarity-asc': (a,b) => a.rarity - b.rarity || a.name.localeCompare(b.name),
+    'damage-desc': (a,b) => baseCardStats(b).attack - baseCardStats(a).attack || b.rarity - a.rarity,
+    'damage-asc': (a,b) => baseCardStats(a).attack - baseCardStats(b).attack || a.rarity - b.rarity,
+    'health-desc': (a,b) => baseCardStats(b).health - baseCardStats(a).health || b.rarity - a.rarity,
+    'health-asc': (a,b) => baseCardStats(a).health - baseCardStats(b).health || a.rarity - b.rarity,
+    'name-asc': (a,b) => a.name.localeCompare(b.name),
+  }
+
   const shown = cardCatalog
     .filter(card => !query || card.name.toLowerCase().includes(query) || String(card.ability || '').toLowerCase().includes(query) || String(card.pack || '').toLowerCase().includes(query) || String(card.weather || '').toLowerCase().includes(query))
-    .sort((a, b) => b.rarity - a.rarity || a.name.localeCompare(b.name))
-    .slice(0, 250)
+    .filter(card => !libraryWeather || card.weather === libraryWeather)
+    .filter(card => !libraryPack || card.pack === libraryPack)
+    .filter(card => libraryOwned !== 'owned' || ownedNames.has(card.name))
+    .sort(sorters[librarySort] || sorters['rarity-desc'])
+    .slice(0, 400)
 
   return `
     <section class="page-intro">
@@ -243,28 +312,64 @@ function cardLibraryPage() {
       <h2>Card Library</h2>
       <p>${cardCatalog.length ? cardCatalog.length + ' cards loaded.' : 'Loading cards…'}</p>
     </section>
+
     <section class="panel">
       <div class="panel-head">
         <div><p class="kicker">CATALOG</p><h3>All Cards</h3></div>
         <span class="panel-count">${shown.length} shown</span>
       </div>
       <div class="panel-body">
-        <input id="librarySearch" class="search-input" value="${esc(libraryQuery)}" placeholder="Search card, ability, pack or weather…" autocomplete="off">
+        <div class="library-controls">
+          <input id="librarySearch" class="search-input" value="${esc(libraryQuery)}" placeholder="Search card, ability, pack or weather…" autocomplete="off">
+          <select id="librarySort">
+            <option value="rarity-desc" ${librarySort==='rarity-desc'?'selected':''}>Rarity · Highest</option>
+            <option value="rarity-asc" ${librarySort==='rarity-asc'?'selected':''}>Rarity · Lowest</option>
+            <option value="damage-desc" ${librarySort==='damage-desc'?'selected':''}>Damage · Highest</option>
+            <option value="damage-asc" ${librarySort==='damage-asc'?'selected':''}>Damage · Lowest</option>
+            <option value="health-desc" ${librarySort==='health-desc'?'selected':''}>Health · Highest</option>
+            <option value="health-asc" ${librarySort==='health-asc'?'selected':''}>Health · Lowest</option>
+            <option value="name-asc" ${librarySort==='name-asc'?'selected':''}>Name · A-Z</option>
+          </select>
+          <select id="libraryWeather">
+            <option value="">All Weathers</option>
+            ${weathers.map(weather => `<option value="${esc(weather)}" ${libraryWeather===weather?'selected':''}>${esc(weather)}</option>`).join('')}
+          </select>
+          <select id="libraryPack">
+            <option value="">All Packs</option>
+            ${packs.map(pack => `<option value="${esc(pack)}" ${libraryPack===pack?'selected':''}>${esc(pack)}</option>`).join('')}
+          </select>
+          <select id="libraryOwned">
+            <option value="all" ${libraryOwned==='all'?'selected':''}>All Cards</option>
+            <option value="owned" ${libraryOwned==='owned'?'selected':''}>Owned Only</option>
+          </select>
+        </div>
+
         <div class="card-library-grid">
-          ${shown.map(card => `
-            <article class="library-card">
-              <div class="library-card-top">
-                <strong>${esc(card.name)}</strong>
-                <span>1 / ${Number(card.rarity || 0).toLocaleString()}</span>
-              </div>
-              <p>${esc(card.ability || 'No ability')}</p>
-              <div class="library-tags">
-                ${card.pack ? `<span>${esc(card.pack)}</span>` : ''}
-                ${card.weather ? `<span>${esc(card.weather)}</span>` : ''}
-                ${card.unobtainable ? '<span>Unobtainable</span>' : ''}
-              </div>
-            </article>
-          `).join('') || '<div class="empty-state"><h3>No matching cards</h3></div>'}
+          ${shown.map(card => {
+            const stats = baseCardStats(card)
+            return `
+              <article class="library-card">
+                ${cardImage(card,'library-card-image')}
+                <div class="library-card-content">
+                  <div class="library-card-top">
+                    <strong>${esc(card.name)}</strong>
+                    <span>1 / ${Number(card.rarity || 0).toLocaleString()}</span>
+                  </div>
+                  <p>${esc(card.ability || 'No ability')}</p>
+                  <div class="library-stats">
+                    <span><b>${compactNumber(stats.attack)}</b> ATK</span>
+                    <span><b>${compactNumber(stats.health)}</b> HP</span>
+                  </div>
+                  <div class="library-tags">
+                    ${card.pack ? `<span>${esc(card.pack)}</span>` : ''}
+                    ${card.weather ? `<span>${esc(card.weather)}</span>` : ''}
+                    ${ownedNames.has(card.name) ? '<span class="owned-tag">Owned</span>' : ''}
+                    ${card.unobtainable ? '<span>Unobtainable</span>' : ''}
+                  </div>
+                </div>
+              </article>
+            `
+          }).join('') || '<div class="empty-state"><h3>No matching cards</h3></div>'}
         </div>
       </div>
     </section>
@@ -435,6 +540,7 @@ function deckHelperPage() {
                 <div class="deck-owned-row ${on ? 'selected' : ''}">
                   <button class="deck-select" data-deck-toggle="${esc(key)}" title="${on ? 'Remove from optimizer' : 'Add to optimizer'}">
                     <i>${on ? '✓' : '+'}</i>
+                    ${cardImage(card.cardName,'card-thumb-sm')}
                     <span><strong>${esc(card.cardName)}</strong><small>${esc((card.borders || []).join(' + ') || card.mutationWeather || 'Base')} · ×${card.quantity}</small></span>
                   </button>
                   ${on ? `
@@ -484,7 +590,7 @@ function deckHelperPage() {
               <article class="native-result-card">
                 <div class="result-rank">#${index + 1}</div>
                 <div class="result-main">
-                  <div class="result-cards">${result.loadout.cards.map((card,pos) => `<span><b>${pos+1}</b>${esc(card.cardName)}</span>`).join('')}</div>
+                  <div class="result-cards">${result.loadout.cards.map((card,pos) => `<span>${cardImage(card.cardName,'result-card-thumb')}<b>${pos+1}</b><em>${esc(card.cardName)}</em></span>`).join('')}</div>
                   <div class="result-meta">
                     <span>Median <b>${Math.round(result.metrics.medianDepth).toLocaleString()}</b></span>
                     <span>Average <b>${Math.round(result.metrics.averageDepth).toLocaleString()}</b></span>
@@ -535,15 +641,37 @@ function ownedAuraNames() {
   return new Set([...auras.statAuras, ...auras.abilityAuras].map(aura => aura.auraName))
 }
 
+function towerToolState() {
+  return store.get().toolState?.tower?.[activeProfile().id] || { poolOverrides: {} }
+}
+
+function updateTowerToolState(next) {
+  const profileId = activeProfile().id
+  store.update(draft => {
+    if (!draft.toolState.tower) draft.toolState.tower = {}
+    const current = draft.toolState.tower[profileId] || { poolOverrides: {} }
+    draft.toolState.tower[profileId] = { ...current, ...next }
+  })
+}
+
+function towerPoolEnabled(name) {
+  const overrides = towerToolState().poolOverrides || {}
+  if (Object.prototype.hasOwnProperty.call(overrides, name)) return Boolean(overrides[name])
+  if (!activeProfile().import.importedAt) return true
+  return ownedCardNames().has(name)
+}
+
 function towerPage() {
   const fixed = TOWER_FIXED[towerFloor]
   const hasPlayerData = Boolean(activeProfile().import.importedAt)
   const owned = ownedCardNames()
+  const enabledCount = CHEESE_POOL.filter(towerPoolEnabled).length
+
   return `
     <section class="page-intro">
       <p class="kicker">TOWER</p>
       <h2>Tower Cheese Maker</h2>
-      <p>Native Tower search using the shared battle engine.</p>
+      <p>Uses the copied Tower engine inside this Toolbox repo.</p>
     </section>
 
     <section class="panel tower-native">
@@ -555,14 +683,15 @@ function towerPage() {
         <div class="tower-control-grid">
           <label><span>Floor</span><input id="towerFloorInput" type="number" min="1" value="${towerFloor}"></label>
           <label><span>Difficulty</span><select id="towerDifficultyInput">${['Normal','Hard','Extreme','Hell','Impossible'].map(name => `<option ${towerDifficulty===name?'selected':''}>${name}</option>`).join('')}</select></label>
-          <label class="tower-owned-toggle"><span>Player Inventory</span><button type="button" data-tower-owned class="${towerOwnedOnly ? 'on' : ''}" ${!hasPlayerData ? 'disabled' : ''}>${hasPlayerData ? (towerOwnedOnly ? 'OWNED ONLY' : 'ALL CHEESE CARDS') : 'NO JSON'}</button></label>
         </div>
+
         <datalist id="towerCardNames">${cardCatalog.filter(card => !card.unobtainable).map(card => `<option value="${esc(card.name)}"></option>`).join('')}</datalist>
         <div class="tower-enemy-grid">
           ${towerEnemies.map((name,index) => {
-            const card = cardCatalog.find(item => item.name === name)
+            const card = cardByName(name)
             return `
               <label class="tower-enemy-box">
+                ${cardImage(card,'tower-enemy-image')}
                 <span>Enemy ${index + 1}</span>
                 <input data-tower-enemy="${index}" list="towerCardNames" value="${esc(name)}">
                 <small>${esc(card?.ability || 'Unknown ability')}</small>
@@ -570,6 +699,35 @@ function towerPage() {
             `
           }).join('')}
         </div>
+      </div>
+    </section>
+
+    <section class="panel cheese-pool-panel">
+      <div class="panel-head">
+        <div><p class="kicker">CHEESE POOL</p><h3>Search Cards</h3></div>
+        <span class="panel-count">${enabledCount}/${CHEESE_POOL.length} enabled</span>
+      </div>
+      <div class="panel-body">
+        <div class="cheese-pool-grid">
+          ${CHEESE_POOL.map(name => {
+            const enabled = towerPoolEnabled(name)
+            const isOwned = owned.has(name)
+            return `
+              <article class="cheese-card ${enabled ? 'on' : ''} ${hasPlayerData && !isOwned ? 'unowned' : ''}">
+                ${cardImage(name,'cheese-card-image')}
+                <div><strong>${esc(name)}</strong><small>${hasPlayerData ? (isOwned ? 'Owned' : 'Not in JSON') : 'No JSON loaded'}</small></div>
+                <button type="button" data-cheese-toggle="${esc(name)}" class="${enabled ? 'on' : ''}">${enabled ? 'ON' : 'OFF'}</button>
+              </article>
+            `
+          }).join('')}
+        </div>
+        <small class="tool-note">Cards missing from the player JSON start OFF, but you can turn any of them back ON.</small>
+      </div>
+    </section>
+
+    <section class="panel tower-search-panel">
+      <div class="panel-head"><div><p class="kicker">SEARCH</p><h3>Deep Search</h3></div></div>
+      <div class="panel-body">
         ${towerError ? `<div class="tool-error">${esc(towerError)}</div>` : ''}
         ${towerProgress ? `
           <div class="search-progress tower-search-progress">
@@ -578,11 +736,8 @@ function towerPage() {
           </div>
         ` : ''}
         <div class="tool-actions right">
-          ${towerWorker
-            ? '<button class="secondary" data-tower-cancel>Cancel</button>'
-            : '<button class="primary" data-tower-search>Deep Search</button>'}
+          ${towerWorker ? '<button class="secondary" data-tower-cancel>Cancel</button>' : '<button class="primary" data-tower-search>Deep Search</button>'}
         </div>
-        ${hasPlayerData && towerOwnedOnly ? `<small class="tool-note">Search pool is limited to cheese cards found in the active player JSON. ${[...owned].length} unique owned cards detected.</small>` : ''}
       </div>
     </section>
 
@@ -595,7 +750,7 @@ function towerPage() {
               <article class="native-result-card">
                 <div class="result-rank">#${index + 1}</div>
                 <div class="result-main">
-                  <div class="result-cards">${candidate.loadout.cards.map((card,pos) => `<span><b>${pos+1}</b>${esc(card.cardName)}</span>`).join('')}</div>
+                  <div class="result-cards">${candidate.loadout.cards.map((card,pos) => `<span>${cardImage(card.cardName,'result-card-thumb')}<b>${pos+1}</b><em>${esc(card.cardName)}</em></span>`).join('')}</div>
                   <div class="result-meta">
                     <span>Win Rate <b>${(candidate.winRate * 100).toFixed(1)}%</b></span>
                     <span>Progress <b>${(candidate.progress * 100).toFixed(1)}%</b></span>
@@ -612,17 +767,204 @@ function towerPage() {
   `
 }
 
+function defaultDepthsState() {
+  return {
+    activeTeam: 0,
+    activeSlot: 0,
+    ownedOnly: Boolean(activeProfile().import.importedAt),
+    teams: Array.from({ length: 5 }, () => ({
+      cards: Array.from({ length: 4 }, () => ({ cardName: '', borders: [], mutationWeather: '' })),
+      statAura: '',
+      statAuraBorder: '',
+      abilityAura: '',
+      abilityAuraBorder: '',
+    })),
+    runs: 15,
+    startFloor: 1,
+    battleSpeedStructureLevel: 0,
+    skillTreeBattleSpeedLevel: 0,
+    chronoShard: true,
+    bountifulDepths: false,
+  }
+}
+
+function depthsToolState() {
+  return store.get().toolState?.depths?.[activeProfile().id] || defaultDepthsState()
+}
+
+function updateDepthsToolState(mutator) {
+  const profileId = activeProfile().id
+  store.update(draft => {
+    if (!draft.toolState.depths) draft.toolState.depths = {}
+    const current = draft.toolState.depths[profileId] || defaultDepthsState()
+    const next = structuredClone(current)
+    mutator(next)
+    draft.toolState.depths[profileId] = next
+  })
+}
+
+function depthsTeamReady(team) {
+  return Boolean(team?.cards?.length === 4 && team.cards.every(card => card.cardName))
+}
+
+function depthAuraOptions(type) {
+  const owned = normalizeOwnedAuras(activeProfile().game.auras)
+  const ownedList = type === 'Stat' ? owned.statAuras : owned.abilityAuras
+  if (activeProfile().import.importedAt && ownedList.length) {
+    const names = new Set(ownedList.map(aura => aura.auraName))
+    return auraCatalog.filter(aura => aura.type === type && names.has(aura.name))
+  }
+  return auraCatalog.filter(aura => aura.type === type && !aura.unobtainable)
+}
+
+function depthLoadout(team) {
+  return {
+    cards: team.cards.map(card => ({
+      cardName: card.cardName,
+      borders: [...(card.borders || [])],
+      mutationWeather: card.mutationWeather || null,
+    })),
+    statAura: team.statAura ? { auraName: team.statAura, border: team.statAuraBorder || null } : null,
+    abilityAura: team.abilityAura ? { auraName: team.abilityAura, border: team.abilityAuraBorder || null } : null,
+  }
+}
+
 function depthsPage() {
+  const state = depthsToolState()
+  const team = state.teams[state.activeTeam]
+  const owned = ownedCardNames()
+  const query = depthsQuery.trim().toLowerCase()
+  const selectable = cardCatalog
+    .filter(card => !card.unobtainable || card.name === 'Conqueror')
+    .filter(card => !state.ownedOnly || !activeProfile().import.importedAt || owned.has(card.name))
+    .filter(card => !query || card.name.toLowerCase().includes(query) || String(card.ability || '').toLowerCase().includes(query))
+    .sort((a,b) => b.rarity - a.rarity)
+    .slice(0,140)
+  const ready = state.teams.filter(depthsTeamReady).length
+  const statAuras = depthAuraOptions('Stat')
+  const skillAuras = depthAuraOptions('Skill')
+
   return `
-    <section class="embedded-wrap">
-      <div class="embedded-bar">
-        <div><p class="kicker">DEPTHS</p><strong>Depths Calculator</strong></div>
-        <a class="secondary small" href="/CardRngExpansionDepths/" target="_blank" rel="noopener">Open Full Screen</a>
+    <section class="page-intro">
+      <p class="kicker">DEPTHS</p>
+      <h2>Depths Calculator</h2>
+      <p>Native Toolbox version using the copied Depths engine.</p>
+    </section>
+
+    <div class="depth-team-tabs">
+      ${state.teams.map((item,index) => {
+        const result = depthsResults[index]
+        return `<button data-depth-team="${index}" class="${state.activeTeam===index?'on':''}"><strong>Team ${index+1}</strong><small>${result ? 'Range ' + compactNumber(result.estimatedFloorLow) + '–' + compactNumber(result.estimatedFloorHigh) : depthsTeamReady(item) ? 'Ready' : 'Empty'}</small></button>`
+      }).join('')}
+    </div>
+
+    <div class="depth-native-grid">
+      <section class="panel depth-loadout-panel">
+        <div class="panel-head"><div><p class="kicker">LOADOUT</p><h3>Team ${state.activeTeam+1}</h3></div></div>
+        <div class="panel-body">
+          <div class="depth-slots">
+            ${team.cards.map((slot,index) => {
+              const card = cardByName(slot.cardName)
+              return `
+                <button class="depth-slot ${state.activeSlot===index?'active':''}" data-depth-slot="${index}">
+                  <span class="depth-slot-num">0${index+1}</span>
+                  ${cardImage(card,'depth-slot-image')}
+                  <span class="depth-slot-copy"><strong>${esc(card?.name || 'Select a card')}</strong><small>${esc(card?.ability || 'Choose from library')}</small></span>
+                </button>
+                ${state.activeSlot===index && card ? `
+                  <div class="depth-slot-options">
+                    <div class="depth-border-row">
+                      ${['Platinum','Crystal','Ruby','Galaxy'].map(border => `<button type="button" data-depth-border="${border}" class="${slot.borders?.includes(border)?'on':''}">${border}</button>`).join('')}
+                    </div>
+                    <label><span>Mutation</span><select id="depthMutation"><option value="">None</option>${['Storm','Snow','Aurora','Shroud','Meteor Shower','Time Storm','Eclipse','Virus','Blood Rain','Armageddon','Manga'].map(weather => `<option value="${weather}" ${slot.mutationWeather===weather?'selected':''}>${weather}</option>`).join('')}</select></label>
+                  </div>
+                ` : ''}
+              `
+            }).join('')}
+          </div>
+
+          <div class="depth-aura-grid">
+            <label><span>Stat Aura</span><select id="depthStatAura"><option value="">None</option>${statAuras.map(aura => `<option value="${esc(aura.name)}" ${team.statAura===aura.name?'selected':''}>${esc(aura.name)}</option>`).join('')}</select></label>
+            <label><span>Stat Border</span><select id="depthStatBorder">${['','Platinum','Crystal','Galaxy'].map(border => `<option value="${border}" ${team.statAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
+            <label><span>Skill Aura</span><select id="depthAbilityAura"><option value="">None</option>${skillAuras.map(aura => `<option value="${esc(aura.name)}" ${team.abilityAura===aura.name?'selected':''}>${esc(aura.name)}</option>`).join('')}</select></label>
+            <label><span>Skill Border</span><select id="depthAbilityBorder">${['','Platinum','Crystal','Galaxy'].map(border => `<option value="${border}" ${team.abilityAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel depth-library-panel">
+        <div class="panel-head">
+          <div><p class="kicker">CARDS</p><h3>Slot ${state.activeSlot+1}</h3></div>
+          <button class="secondary small" data-depth-owned-toggle>${state.ownedOnly && activeProfile().import.importedAt ? 'Owned Only' : 'All Cards'}</button>
+        </div>
+        <div class="panel-body">
+          <input id="depthSearch" class="search-input" value="${esc(depthsQuery)}" placeholder="Search card or ability…" autocomplete="off">
+          <div class="depth-card-list">
+            ${selectable.map(card => `
+              <button data-depth-card="${esc(card.name)}" class="${team.cards[state.activeSlot]?.cardName===card.name?'selected':''}">
+                ${cardImage(card,'card-thumb-md')}
+                <span><strong>${esc(card.name)}</strong><small>${esc(card.ability || 'No ability')}</small></span>
+                <em>1 / ${Number(card.rarity).toLocaleString()}</em>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      </section>
+
+      <section class="panel depth-sim-panel">
+        <div class="panel-head"><div><p class="kicker">SIMULATOR</p><h3>Run Test</h3></div><span class="panel-count">${ready}/5 ready</span></div>
+        <div class="panel-body depth-sim-body">
+          <label><span>Runs</span><select id="depthRuns">${[1,3,8,15,30,50].map(value => `<option value="${value}" ${state.runs===value?'selected':''}>${value}</option>`).join('')}</select></label>
+          <label><span>Start Floor</span><input id="depthStartFloor" type="number" min="1" max="40000" value="${state.startFloor}"></label>
+          <label><span>Battle Speed Structure</span><select id="depthStructureLevel">${Array.from({length:8},(_,value)=>`<option value="${value}" ${state.battleSpeedStructureLevel===value?'selected':''}>Level ${value}</option>`).join('')}</select></label>
+          <label><span>Skill Tree Battle Speed</span><select id="depthSkillLevel">${Array.from({length:5},(_,value)=>`<option value="${value}" ${state.skillTreeBattleSpeedLevel===value?'selected':''}>Level ${value}</option>`).join('')}</select></label>
+          <div class="depth-toggle-row">
+            <button type="button" data-depth-chrono class="${state.chronoShard?'on':''}">Chrono Shard · ${state.chronoShard?'ON':'OFF'}</button>
+            <button type="button" data-depth-bountiful class="${state.bountifulDepths?'on':''}">Bountiful Depths · ${state.bountifulDepths?'ON':'OFF'}</button>
+          </div>
+
+          ${depthsProgress[state.activeTeam] ? `
+            <div class="search-progress">
+              <div><strong>Running Team ${state.activeTeam+1}</strong><span>${Number(depthsProgress[state.activeTeam].completedRuns || 0)}/${Number(depthsProgress[state.activeTeam].totalRuns || state.runs)} runs</span></div>
+              <div class="progress-track"><i style="width:${Math.round((Number(depthsProgress[state.activeTeam].completedRuns || 0) / Math.max(1, Number(depthsProgress[state.activeTeam].totalRuns || state.runs))) * 100)}%"></i></div>
+            </div>
+          ` : ''}
+
+          <div class="tool-actions">
+            <button class="secondary" data-depth-run-active ${!depthsTeamReady(team)?'disabled':''}>Test Team ${state.activeTeam+1}</button>
+            <button class="primary" data-depth-run-ready ${ready===0?'disabled':''}>Test ${ready} Ready Team${ready===1?'':'s'}</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel native-results">
+      <div class="panel-head"><div><p class="kicker">RESULTS</p><h3>${Object.keys(depthsResults).length ? 'Team Comparison' : 'No simulations yet'}</h3></div></div>
+      <div class="panel-body">
+        ${Object.entries(depthsResults).length ? `
+          <div class="depth-result-grid">
+            ${Object.entries(depthsResults).sort((a,b)=>Number(a[0])-Number(b[0])).map(([index,result]) => result.error ? `
+              <article class="depth-result-card"><div class="tool-error">Team ${Number(index)+1}: ${esc(result.error)}</div></article>
+            ` : `
+              <article class="depth-result-card">
+                <div class="depth-result-head"><strong>Team ${Number(index)+1}</strong><span>${compactNumber(result.estimatedFloorLow)}–${compactNumber(result.estimatedFloorHigh)}</span></div>
+                <div class="depth-result-loadout">${state.teams[index].cards.map(card => `<span>${cardImage(card.cardName,'result-card-thumb')}<em>${esc(card.cardName)}</em></span>`).join('')}</div>
+                <div class="result-meta">
+                  <span>Median <b>${compactNumber(result.medianFloor)}</b></span>
+                  <span>Average <b>${compactNumber(result.averageFloor)}</b></span>
+                  <span>Low <b>${compactNumber(result.minFloor)}</b></span>
+                  <span>High <b>${compactNumber(result.maxFloor)}</b></span>
+                </div>
+              </article>
+            `).join('')}
+          </div>
+        ` : '<div class="empty-state compact-empty"><h3>Build a team and run a test.</h3></div>'}
       </div>
-      <iframe class="tool-frame" src="/CardRngExpansionDepths/" title="Depths Calculator" allow="clipboard-read; clipboard-write"></iframe>
     </section>
   `
 }
+
+
 
 function towerPower(floor, difficulty) {
   const ids = { Normal: 1, Hard: 2, Extreme: 3, Hell: 5, Impossible: 6 }
@@ -724,6 +1066,56 @@ function saveJson() {
   }
 }
 
+function startDepthsRuns(indices) {
+  const state = depthsToolState()
+  for (const index of indices) {
+    if (!depthsTeamReady(state.teams[index])) continue
+    depthsWorkers.get(index)?.terminate()
+    const worker = new Worker('./assets/depths-worker.js?v=1')
+    depthsWorkers.set(index, worker)
+    const id = ++depthRequestId
+    depthsProgress[index] = { completedRuns: 0, totalRuns: state.runs }
+
+    worker.onmessage = event => {
+      const message = event.data || {}
+      if (message.id !== id) return
+      if (message.kind === 'progress') {
+        depthsProgress[index] = message
+        if (route === 'depths') render()
+        return
+      }
+      if (message.ok) depthsResults[index] = message.result
+      else depthsResults[index] = { error: message.error || 'Simulation failed' }
+      delete depthsProgress[index]
+      worker.terminate()
+      depthsWorkers.delete(index)
+      if (route === 'depths') render()
+    }
+    worker.onerror = event => {
+      depthsResults[index] = { error: event.message || 'Simulation failed' }
+      delete depthsProgress[index]
+      worker.terminate()
+      depthsWorkers.delete(index)
+      if (route === 'depths') render()
+    }
+
+    worker.postMessage({
+      id,
+      loadout: depthLoadout(state.teams[index]),
+      runs: state.runs,
+      startFloor: state.startFloor,
+      floorCap: 100000,
+      seed: ((Date.now() + index * 7919) >>> 0) || 1,
+      bountifulDepths: state.bountifulDepths,
+      battleSpeedStructureLevel: state.battleSpeedStructureLevel,
+      skillTreeBattleSpeedLevel: state.skillTreeBattleSpeedLevel,
+      chronoShard: state.chronoShard,
+      bannedCardNames: [],
+    })
+  }
+  render()
+}
+
 function cancelDeckSearch() {
   if (deckWorker) deckWorker.terminate()
   deckWorker = null
@@ -800,18 +1192,14 @@ function startTowerSearch() {
     return
   }
 
-  const owned = ownedCardNames()
-  let excludedCards = []
-  if (activeProfile().import.importedAt && towerOwnedOnly) {
-    excludedCards = CHEESE_POOL.filter(name => !owned.has(name))
-    if (excludedCards.length === CHEESE_POOL.length) {
-      towerError = 'None of the standard cheese cards were found in this player JSON.'
-      render()
-      return
-    }
+  const excludedCards = CHEESE_POOL.filter(name => !towerPoolEnabled(name))
+  if (excludedCards.length === CHEESE_POOL.length) {
+    towerError = 'Turn on at least one cheese card.'
+    render()
+    return
   }
 
-  const hasEndTimes = !activeProfile().import.importedAt || !towerOwnedOnly || ownedAuraNames().has('End Times')
+  const hasEndTimes = true
   towerError = ''
   towerResult = null
   towerProgress = { phase: 'exhaustive', completed: 0, total: 1, battleSimulations: 0 }
@@ -903,6 +1291,10 @@ function bind() {
       next?.setSelectionRange(next.value.length, next.value.length)
     })
   }
+  document.querySelector('#librarySort')?.addEventListener('change', event => { librarySort = event.target.value; render() })
+  document.querySelector('#libraryWeather')?.addEventListener('change', event => { libraryWeather = event.target.value; render() })
+  document.querySelector('#libraryPack')?.addEventListener('change', event => { libraryPack = event.target.value; render() })
+  document.querySelector('#libraryOwned')?.addEventListener('change', event => { libraryOwned = event.target.value; render() })
 
   const deckSearch = document.querySelector('#deckInventorySearch')
   if (deckSearch) deckSearch.oninput = () => {
@@ -966,13 +1358,68 @@ function bind() {
     towerError = ''
     render()
   }))
-  document.querySelector('[data-tower-owned]')?.addEventListener('click', () => {
-    towerOwnedOnly = !towerOwnedOnly
+  document.querySelectorAll('[data-cheese-toggle]').forEach(button => button.addEventListener('click', () => {
+    const name = button.dataset.cheeseToggle
+    const current = towerToolState()
+    const poolOverrides = { ...(current.poolOverrides || {}) }
+    poolOverrides[name] = !towerPoolEnabled(name)
+    updateTowerToolState({ poolOverrides })
     towerResult = null
-    render()
-  })
+  }))
   document.querySelector('[data-tower-search]')?.addEventListener('click', startTowerSearch)
   document.querySelector('[data-tower-cancel]')?.addEventListener('click', cancelTowerSearch)
+
+  document.querySelectorAll('[data-depth-team]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => { state.activeTeam = Number(button.dataset.depthTeam); state.activeSlot = 0 })
+  }))
+  document.querySelectorAll('[data-depth-slot]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => { state.activeSlot = Number(button.dataset.depthSlot) })
+  }))
+  document.querySelectorAll('[data-depth-card]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => {
+      const slot = state.teams[state.activeTeam].cards[state.activeSlot]
+      slot.cardName = button.dataset.depthCard
+      slot.mutationWeather = ''
+    })
+    delete depthsResults[depthsToolState().activeTeam]
+  }))
+  document.querySelectorAll('[data-depth-border]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => {
+      const slot = state.teams[state.activeTeam].cards[state.activeSlot]
+      const border = button.dataset.depthBorder
+      slot.borders = slot.borders.includes(border) ? slot.borders.filter(value => value !== border) : [...slot.borders, border]
+    })
+    delete depthsResults[depthsToolState().activeTeam]
+  }))
+  document.querySelector('#depthMutation')?.addEventListener('change', event => {
+    updateDepthsToolState(state => { state.teams[state.activeTeam].cards[state.activeSlot].mutationWeather = event.target.value })
+  })
+  document.querySelector('#depthStatAura')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].statAura = event.target.value }))
+  document.querySelector('#depthStatBorder')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].statAuraBorder = event.target.value }))
+  document.querySelector('#depthAbilityAura')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAura = event.target.value }))
+  document.querySelector('#depthAbilityBorder')?.addEventListener('change', event => updateDepthsToolState(state => { state.teams[state.activeTeam].abilityAuraBorder = event.target.value }))
+  document.querySelector('[data-depth-owned-toggle]')?.addEventListener('click', () => updateDepthsToolState(state => { state.ownedOnly = !state.ownedOnly }))
+  const depthSearch = document.querySelector('#depthSearch')
+  if (depthSearch) depthSearch.oninput = () => {
+    depthsQuery = depthSearch.value
+    render()
+    requestAnimationFrame(() => {
+      const next = document.querySelector('#depthSearch')
+      next?.focus()
+      next?.setSelectionRange(next.value.length, next.value.length)
+    })
+  }
+  document.querySelector('#depthRuns')?.addEventListener('change', event => updateDepthsToolState(state => { state.runs = Number(event.target.value) }))
+  document.querySelector('#depthStartFloor')?.addEventListener('change', event => updateDepthsToolState(state => { state.startFloor = Math.min(40000, Math.max(1, Math.floor(Number(event.target.value)||1))) }))
+  document.querySelector('#depthStructureLevel')?.addEventListener('change', event => updateDepthsToolState(state => { state.battleSpeedStructureLevel = Number(event.target.value)||0 }))
+  document.querySelector('#depthSkillLevel')?.addEventListener('change', event => updateDepthsToolState(state => { state.skillTreeBattleSpeedLevel = Number(event.target.value)||0 }))
+  document.querySelector('[data-depth-chrono]')?.addEventListener('click', () => updateDepthsToolState(state => { state.chronoShard = !state.chronoShard }))
+  document.querySelector('[data-depth-bountiful]')?.addEventListener('click', () => updateDepthsToolState(state => { state.bountifulDepths = !state.bountifulDepths }))
+  document.querySelector('[data-depth-run-active]')?.addEventListener('click', () => startDepthsRuns([depthsToolState().activeTeam]))
+  document.querySelector('[data-depth-run-ready]')?.addEventListener('click', () => {
+    const state = depthsToolState()
+    startDepthsRuns(state.teams.map((team,index) => depthsTeamReady(team) ? index : -1).filter(index => index >= 0))
+  })
 
   document.querySelector('#rollSpeedBonus')?.addEventListener('input', updateRollCalculator)
   document.querySelector('#towerCalcFloor')?.addEventListener('input', updateTowerCalculator)
