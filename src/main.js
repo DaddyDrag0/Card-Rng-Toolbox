@@ -714,7 +714,6 @@ function towerPage() {
             const isOwned = owned.has(name)
             return `
               <article class="cheese-card ${enabled ? 'on' : ''} ${hasPlayerData && !isOwned ? 'unowned' : ''}">
-                ${cardImage(name,'cheese-card-image')}
                 <div><strong>${esc(name)}</strong><small>${hasPlayerData ? (isOwned ? 'Owned' : 'Not in JSON') : 'No JSON loaded'}</small></div>
                 <button type="button" data-cheese-toggle="${esc(name)}" class="${enabled ? 'on' : ''}">${enabled ? 'ON' : 'OFF'}</button>
               </article>
@@ -767,6 +766,104 @@ function towerPage() {
   `
 }
 
+
+const MAX_DEPTH_BANS = 14
+const DEPTHS_DEFAULT_BANS = new Set(['Vampire Lord','Parallax','Samurai'])
+const DEPTH_MUTATIONS = ['Storm','Snow','Aurora','Shroud','Meteor Shower','Time Storm','Eclipse','Virus','Blood Rain','Armageddon','Manga']
+const DEPTH_BORDERS = ['Platinum','Crystal','Ruby','Galaxy']
+const AURA_BORDERS = ['','Platinum','Crystal','Galaxy']
+
+function depthBanEligible(card) {
+  return Boolean(card && !card.unobtainable && !card.expires && !card.boss && !DEPTHS_DEFAULT_BANS.has(card.name) && card.pack !== 'Christmas' && card.pack !== 'Halloween' && card.pack !== 'Halloween2')
+}
+
+function sanitizeDepthBans(values) {
+  const seen = new Set()
+  const out = []
+  for (const raw of Array.isArray(values) ? values : []) {
+    const name = String(raw || '')
+    const card = cardByName(name)
+    if (!depthBanEligible(card) || seen.has(name)) continue
+    seen.add(name)
+    out.push(name)
+    if (out.length >= MAX_DEPTH_BANS) break
+  }
+  return out
+}
+
+function encodeDepthTeam(team) {
+  const payload = {
+    v: 2,
+    c: team.cards.map(slot => [slot.cardName, [...(slot.borders || [])], slot.mutationWeather || '']),
+    s: [team.statAura || '', team.statAuraBorder || ''],
+    a: [team.abilityAura || '', team.abilityAuraBorder || ''],
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify(payload))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return 'CRE1-' + btoa(binary).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_')
+}
+
+function decodeDepthTeam(code) {
+  const clean = String(code || '').trim()
+  if (!clean.startsWith('CRE1-')) throw new Error('Team code must start with CRE1-')
+  let raw = clean.slice(5).replace(/-/g,'+').replace(/_/g,'/')
+  while (raw.length % 4) raw += '='
+  const binary = atob(raw)
+  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0))
+  const payload = JSON.parse(new TextDecoder().decode(bytes))
+  if (![1,2].includes(payload.v) || !Array.isArray(payload.c) || payload.c.length !== 4) throw new Error('Unsupported team code')
+  const team = {
+    cards: payload.c.map(slot => ({
+      cardName: String(slot?.[0] || ''),
+      borders: Array.isArray(slot?.[1]) ? slot[1].filter(border => DEPTH_BORDERS.includes(border)) : [],
+      mutationWeather: payload.v >= 2 && DEPTH_MUTATIONS.includes(slot?.[2]) ? slot[2] : '',
+    })),
+    statAura: String(payload.s?.[0] || ''),
+    statAuraBorder: AURA_BORDERS.includes(payload.s?.[1]) ? payload.s[1] : '',
+    abilityAura: String(payload.a?.[0] || ''),
+    abilityAuraBorder: AURA_BORDERS.includes(payload.a?.[1]) ? payload.a[1] : '',
+  }
+  for (const slot of team.cards) if (slot.cardName && !cardByName(slot.cardName)) throw new Error('Unknown card: ' + slot.cardName)
+  return team
+}
+
+function encodeDepthBans(bans) {
+  const payload = { v: 2, bans: sanitizeDepthBans(bans) }
+  const bytes = new TextEncoder().encode(JSON.stringify(payload))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return 'CRB1-' + btoa(binary)
+}
+
+function decodeDepthBans(code) {
+  const raw = String(code || '').trim()
+  if (!raw.startsWith('CRB1-')) throw new Error('Ban code must start with CRB1-')
+  let payload
+  try {
+    const binary = atob(raw.slice(5))
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0))
+    payload = JSON.parse(new TextDecoder().decode(bytes))
+  } catch {
+    throw new Error('Invalid ban code')
+  }
+  if (payload?.v === 2 && Array.isArray(payload.bans)) return sanitizeDepthBans(payload.bans)
+  if (payload?.v === 1 && Array.isArray(payload.layouts)) {
+    const source = Math.max(0, Math.min(3, Math.floor(Number(payload.active) || 0)))
+    return sanitizeDepthBans(payload.layouts[source])
+  }
+  throw new Error('Unsupported ban code')
+}
+
+function durationLabel(seconds) {
+  const total = Math.max(0, Number(seconds) || 0)
+  if (total < 60) return total.toFixed(1) + 's'
+  if (total < 3600) return Math.floor(total / 60) + 'm ' + Math.round(total % 60) + 's'
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.round((total % 3600) / 60)
+  return hours + 'h ' + minutes + 'm'
+}
+
 function defaultDepthsState() {
   return {
     activeTeam: 0,
@@ -785,11 +882,22 @@ function defaultDepthsState() {
     skillTreeBattleSpeedLevel: 0,
     chronoShard: true,
     bountifulDepths: false,
+    depthBanLayouts: [[],[],[],[]],
+    activeDepthBanLayout: 0,
+    depthBanQuery: '',
   }
 }
 
 function depthsToolState() {
-  return store.get().toolState?.depths?.[activeProfile().id] || defaultDepthsState()
+  const saved = store.get().toolState?.depths?.[activeProfile().id]
+  if (!saved) return defaultDepthsState()
+  const next = { ...defaultDepthsState(), ...saved }
+  next.depthBanLayouts = Array.isArray(saved.depthBanLayouts)
+    ? Array.from({ length: 4 }, (_,index) => sanitizeDepthBans(saved.depthBanLayouts[index]))
+    : [sanitizeDepthBans(saved.depthBans),[],[],[]]
+  next.activeDepthBanLayout = Math.max(0, Math.min(3, Number(saved.activeDepthBanLayout) || 0))
+  next.depthBanQuery = String(saved.depthBanQuery || '')
+  return next
 }
 
 function updateDepthsToolState(mutator) {
@@ -840,33 +948,55 @@ function depthsPage() {
     .filter(card => !query || card.name.toLowerCase().includes(query) || String(card.ability || '').toLowerCase().includes(query))
     .sort((a,b) => b.rarity - a.rarity)
     .slice(0,140)
+
   const ready = state.teams.filter(depthsTeamReady).length
   const statAuras = depthAuraOptions('Stat')
   const skillAuras = depthAuraOptions('Skill')
+  const activeBans = state.depthBanLayouts[state.activeDepthBanLayout] || []
+  const banQuery = state.depthBanQuery.trim().toLowerCase()
+  const banCandidates = banQuery
+    ? cardCatalog.filter(depthBanEligible).filter(card => !activeBans.includes(card.name))
+        .filter(card => card.name.toLowerCase().includes(banQuery) || String(card.ability || '').toLowerCase().includes(banQuery))
+        .sort((a,b) => a.name.localeCompare(b.name)).slice(0,10)
+    : []
+  const running = depthsWorkers.size > 0
 
   return `
-    <section class="page-intro">
-      <p class="kicker">DEPTHS</p>
-      <h2>Depths Calculator</h2>
-      <p>Native Toolbox version using the copied Depths engine.</p>
+    <section class="page-intro depths-title-row">
+      <div>
+        <p class="kicker">DEPTHS</p>
+        <h2>Depths Calculator</h2>
+        <p>Full Toolbox version using the copied Depths engine.</p>
+      </div>
+      <div class="depth-page-actions">
+        <button class="secondary small" data-depth-clear-results ${Object.keys(depthsResults).length ? '' : 'disabled'}>Clear Results</button>
+      </div>
     </section>
 
-    <div class="depth-team-tabs">
+    <div class="depth-team-tabs depth-team-tabs-actions">
       ${state.teams.map((item,index) => {
         const result = depthsResults[index]
         return `<button data-depth-team="${index}" class="${state.activeTeam===index?'on':''}"><strong>Team ${index+1}</strong><small>${result ? (result.error ? 'Error' : 'Range ' + compactNumber(result.estimatedFloorLow) + '–' + compactNumber(result.estimatedFloorHigh)) : depthsTeamReady(item) ? 'Ready' : 'Empty'}</small></button>`
       }).join('')}
+      <button class="depth-duplicate-tab" data-depth-duplicate><strong>Duplicate</strong><small>Copy active team</small></button>
     </div>
 
     <div class="depth-native-grid">
       <section class="panel depth-loadout-panel">
-        <div class="panel-head"><div><p class="kicker">LOADOUT</p><h3>Team ${state.activeTeam+1}</h3></div></div>
+        <div class="panel-head">
+          <div><p class="kicker">LOADOUT</p><h3>Team ${state.activeTeam+1}</h3></div>
+          <div class="panel-head-actions">
+            <button class="text-mini" data-depth-copy-team>Copy Code</button>
+            <button class="text-mini" data-depth-import-team>Import Code</button>
+            <button class="text-mini danger" data-depth-clear-team>Clear Team</button>
+          </div>
+        </div>
         <div class="panel-body">
           <div class="depth-slots">
             ${team.cards.map((slot,index) => {
               const card = cardByName(slot.cardName)
               return `
-                <button class="depth-slot ${state.activeSlot===index?'active':''}" data-depth-slot="${index}">
+                <button class="depth-slot ${state.activeSlot===index?'active':''}" data-depth-slot="${index}" draggable="true">
                   <span class="depth-slot-num">0${index+1}</span>
                   ${cardImage(card,'depth-slot-image')}
                   <span class="depth-slot-copy"><strong>${esc(card?.name || 'Select a card')}</strong><small>${esc(card?.ability || 'Choose from library')}</small></span>
@@ -874,9 +1004,9 @@ function depthsPage() {
                 ${state.activeSlot===index && card ? `
                   <div class="depth-slot-options">
                     <div class="depth-border-row">
-                      ${['Platinum','Crystal','Ruby','Galaxy'].map(border => `<button type="button" data-depth-border="${border}" class="${slot.borders?.includes(border)?'on':''}">${border}</button>`).join('')}
+                      ${DEPTH_BORDERS.map(border => `<button type="button" data-depth-border="${border}" class="${slot.borders?.includes(border)?'on':''}">${border}</button>`).join('')}
                     </div>
-                    <label><span>Mutation</span><select id="depthMutation"><option value="">None</option>${['Storm','Snow','Aurora','Shroud','Meteor Shower','Time Storm','Eclipse','Virus','Blood Rain','Armageddon','Manga'].map(weather => `<option value="${weather}" ${slot.mutationWeather===weather?'selected':''}>${weather}</option>`).join('')}</select></label>
+                    <label><span>Mutation</span><select id="depthMutation"><option value="">None</option>${DEPTH_MUTATIONS.map(weather => `<option value="${weather}" ${slot.mutationWeather===weather?'selected':''}>${weather}</option>`).join('')}</select></label>
                   </div>
                 ` : ''}
               `
@@ -885,9 +1015,9 @@ function depthsPage() {
 
           <div class="depth-aura-grid">
             <label><span>Stat Aura</span><select id="depthStatAura"><option value="">None</option>${statAuras.map(aura => `<option value="${esc(aura.name)}" ${team.statAura===aura.name?'selected':''}>${esc(aura.name)}</option>`).join('')}</select></label>
-            <label><span>Stat Border</span><select id="depthStatBorder">${['','Platinum','Crystal','Galaxy'].map(border => `<option value="${border}" ${team.statAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
+            <label><span>Stat Border</span><select id="depthStatBorder">${AURA_BORDERS.map(border => `<option value="${border}" ${team.statAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
             <label><span>Skill Aura</span><select id="depthAbilityAura"><option value="">None</option>${skillAuras.map(aura => `<option value="${esc(aura.name)}" ${team.abilityAura===aura.name?'selected':''}>${esc(aura.name)}</option>`).join('')}</select></label>
-            <label><span>Skill Border</span><select id="depthAbilityBorder">${['','Platinum','Crystal','Galaxy'].map(border => `<option value="${border}" ${team.abilityAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
+            <label><span>Skill Border</span><select id="depthAbilityBorder">${AURA_BORDERS.map(border => `<option value="${border}" ${team.abilityAuraBorder===border?'selected':''}>${border||'Base'}</option>`).join('')}</select></label>
           </div>
         </div>
       </section>
@@ -916,11 +1046,37 @@ function depthsPage() {
         <div class="panel-body depth-sim-body">
           <label><span>Runs</span><select id="depthRuns">${[1,3,8,15,30,50].map(value => `<option value="${value}" ${state.runs===value?'selected':''}>${value}</option>`).join('')}</select></label>
           <label><span>Start Floor</span><input id="depthStartFloor" type="number" min="1" max="40000" value="${state.startFloor}"></label>
-          <label><span>Battle Speed Structure</span><select id="depthStructureLevel">${Array.from({length:8},(_,value)=>`<option value="${value}" ${state.battleSpeedStructureLevel===value?'selected':''}>Level ${value}</option>`).join('')}</select></label>
-          <label><span>Skill Tree Battle Speed</span><select id="depthSkillLevel">${Array.from({length:5},(_,value)=>`<option value="${value}" ${state.skillTreeBattleSpeedLevel===value?'selected':''}>Level ${value}</option>`).join('')}</select></label>
+          <label><span>Floor Cap</span><input value="100,000" readonly></label>
+          <label><span>Battle Speed Structure</span><select id="depthStructureLevel">${Array.from({length:8},(_,value)=>`<option value="${value}" ${state.battleSpeedStructureLevel===value?'selected':''}>Level ${value} · +${(value*.25).toFixed(2)}</option>`).join('')}</select></label>
+          <label><span>Skill Tree Battle Speed</span><select id="depthSkillLevel">${[0,.5,1,1.5,2.5].map((bonus,value)=>`<option value="${value}" ${state.skillTreeBattleSpeedLevel===value?'selected':''}>Level ${value} · +${bonus.toFixed(2)}</option>`).join('')}</select></label>
+
           <div class="depth-toggle-row">
             <button type="button" data-depth-chrono class="${state.chronoShard?'on':''}">Chrono Shard · ${state.chronoShard?'ON':'OFF'}</button>
             <button type="button" data-depth-bountiful class="${state.bountifulDepths?'on':''}">Bountiful Depths · ${state.bountifulDepths?'ON':'OFF'}</button>
+          </div>
+
+          <div class="depth-ban-box">
+            <div class="depth-ban-top">
+              <div><span>Depth Bans</span><b>${activeBans.length}/${MAX_DEPTH_BANS}</b></div>
+              ${activeBans.length ? '<button type="button" data-depth-ban-clear>Clear</button>' : ''}
+            </div>
+            <div class="depth-ban-layout-tabs">
+              ${state.depthBanLayouts.map((bans,index) => `<button type="button" data-depth-ban-layout="${index}" class="${state.activeDepthBanLayout===index?'on':''}">Ban ${index+1}<small>${bans.length}/${MAX_DEPTH_BANS}</small></button>`).join('')}
+            </div>
+            <div class="depth-ban-actions">
+              <button type="button" data-depth-ban-export>Export Bans</button>
+              <button type="button" data-depth-ban-import>Import Bans</button>
+            </div>
+            <small class="depth-ban-help">Vampire Lord, Parallax, and Samurai are always banned and do not use these slots.</small>
+            ${activeBans.length ? `<div class="depth-ban-chips">${activeBans.map((name,index) => `<button type="button" data-depth-ban-remove="${index}">${esc(name)} ×</button>`).join('')}</div>` : ''}
+            <div class="depth-ban-search">
+              <input id="depthBanSearch" value="${esc(state.depthBanQuery)}" placeholder="${activeBans.length >= MAX_DEPTH_BANS ? '14/14 bans selected' : 'Search a card to ban…'}" ${activeBans.length >= MAX_DEPTH_BANS ? 'disabled' : ''}>
+              ${banQuery && activeBans.length < MAX_DEPTH_BANS ? `
+                <div class="depth-ban-suggestions">
+                  ${banCandidates.length ? banCandidates.map(card => `<button type="button" data-depth-ban-add="${esc(card.name)}"><span>${esc(card.name)}</span><small>${esc(card.ability || 'No ability')}</small></button>`).join('') : '<small>No eligible cards found.</small>'}
+                </div>
+              ` : ''}
+            </div>
           </div>
 
           ${depthsProgress[state.activeTeam] ? `
@@ -931,8 +1087,9 @@ function depthsPage() {
           ` : ''}
 
           <div class="tool-actions">
-            <button class="secondary" data-depth-run-active ${!depthsTeamReady(team)?'disabled':''}>Test Team ${state.activeTeam+1}</button>
-            <button class="primary" data-depth-run-ready ${ready===0?'disabled':''}>Test ${ready} Ready Team${ready===1?'':'s'}</button>
+            ${running
+              ? '<button class="secondary" data-depth-cancel>Cancel Simulation</button>'
+              : `<button class="secondary" data-depth-run-active ${!depthsTeamReady(team)?'disabled':''}>Test Team ${state.activeTeam+1}</button><button class="primary" data-depth-run-ready ${ready===0?'disabled':''}>Test ${ready} Ready Team${ready===1?'':'s'}</button>`}
           </div>
         </div>
       </section>
@@ -945,25 +1102,46 @@ function depthsPage() {
           <div class="depth-result-grid">
             ${Object.entries(depthsResults).sort((a,b)=>Number(a[0])-Number(b[0])).map(([index,result]) => result.error ? `
               <article class="depth-result-card"><div class="tool-error">Team ${Number(index)+1}: ${esc(result.error)}</div></article>
-            ` : `
-              <article class="depth-result-card">
-                <div class="depth-result-head"><strong>Team ${Number(index)+1}</strong><span>${compactNumber(result.estimatedFloorLow)}–${compactNumber(result.estimatedFloorHigh)}</span></div>
-                <div class="depth-result-loadout">${state.teams[index].cards.map(card => `<span>${cardImage(card.cardName,'result-card-thumb')}<em>${esc(card.cardName)}</em></span>`).join('')}</div>
-                <div class="result-meta">
-                  <span>Median <b>${compactNumber(result.medianFloor)}</b></span>
-                  <span>Average <b>${compactNumber(result.averageFloor)}</b></span>
-                  <span>Low <b>${compactNumber(result.minFloor)}</b></span>
-                  <span>High <b>${compactNumber(result.maxFloor)}</b></span>
-                </div>
-              </article>
-            `).join('')}
+            ` : (() => {
+              const resultTeam = state.teams[index]
+              const avgTurns = Array.isArray(result.runs) && result.runs.length ? result.runs.reduce((sum,run)=>sum + (Number(run.totalTurns)||0),0) / result.runs.length : 0
+              const common = {}
+              for (const run of result.runs || []) for (const name of run.endingEnemies || []) common[name] = (common[name] || 0) + 1
+              const commonEnemies = Object.entries(common).sort((a,b)=>b[1]-a[1]).slice(0,6)
+              return `
+                <article class="depth-result-card">
+                  <div class="depth-result-head"><strong>Team ${Number(index)+1}</strong><span>${compactNumber(result.estimatedFloorLow)}–${compactNumber(result.estimatedFloorHigh)}</span></div>
+                  <div class="depth-result-loadout">${resultTeam.cards.map(card => `<span>${cardImage(card.cardName,'result-card-thumb')}<em>${esc(card.cardName)}</em></span>`).join('')}</div>
+                  <div class="depth-result-metrics">
+                    <div><span>Median Depth</span><b>${compactNumber(result.medianFloor)}</b></div>
+                    <div><span>Aura Packs</span><b>${compactNumber(result.auraPackLow)}–${compactNumber(result.auraPackHigh)}</b><small>Median ${compactNumber(result.auraPackMedian)}</small></div>
+                    <div><span>Clear Time</span><b>${durationLabel(result.estimatedSecondsMedian)}</b><small>${durationLabel(result.estimatedSecondsLow)}–${durationLabel(result.estimatedSecondsHigh)}</small></div>
+                    <div><span>Aura Cards / Hour</span><b>${compactNumber(result.auraCardsPerHour)}</b></div>
+                  </div>
+                  ${result.potionRewards ? `
+                    <div class="depth-rewards">
+                      <span>Jackpot Potion <b>${Number(result.potionRewards.median.jackpot.expected || 0).toFixed(2)} / run</b></span>
+                      <span>Rare Weather <b>${Number(result.potionRewards.median.rareWeather.expected || 0).toFixed(2)} / run</b></span>
+                    </div>
+                  ` : ''}
+                  <div class="result-meta">
+                    <span>${result.runs?.length || 0} runs</span>
+                    <span>${avgTurns.toFixed(1)} avg turns</span>
+                    <span>Low <b>${compactNumber(result.minFloor)}</b></span>
+                    <span>High <b>${compactNumber(result.maxFloor)}</b></span>
+                  </div>
+                  ${result.runs?.length ? `<div class="depth-floor-strip">${result.runs.map((run,runIndex) => `<button type="button" data-depth-run-detail="${index}:${runIndex}" title="${esc((run.endingEnemies || []).join(' / '))}">${compactNumber(run.deathFloor)}</button>`).join('')}</div>` : ''}
+                  ${commonEnemies.length ? `<div class="depth-common-enemies"><span>Most common losing-floor enemies</span><div>${commonEnemies.map(([name,count]) => `<i>${esc(name)} <b>×${count}</b></i>`).join('')}</div></div>` : ''}
+                  ${result.unsupportedAbilities?.length ? `<div class="tool-error">Unsupported: ${esc(result.unsupportedAbilities.join(', '))}</div>` : ''}
+                </article>
+              `
+            })()).join('')}
           </div>
         ` : '<div class="empty-state compact-empty"><h3>Build a team and run a test.</h3></div>'}
       </div>
     </section>
   `
 }
-
 
 
 function towerPower(floor, difficulty) {
@@ -1114,7 +1292,7 @@ function startDepthsRuns(indices) {
       battleSpeedStructureLevel: state.battleSpeedStructureLevel,
       skillTreeBattleSpeedLevel: state.skillTreeBattleSpeedLevel,
       chronoShard: state.chronoShard,
-      bannedCardNames: [],
+      bannedCardNames: sanitizeDepthBans(state.depthBanLayouts[state.activeDepthBanLayout] || []),
     })
   }
   render()
