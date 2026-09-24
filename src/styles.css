@@ -508,3 +508,118 @@ h1,h2,h3,p{margin:0}
   .depth-aura-grid{grid-template-columns:1fr}
   .result-cards,.depth-result-loadout{grid-template-columns:1fr 1fr}
 }
+
+
+/* Tower sizing cleanup */
+.tower-enemy-grid{align-items:start}
+.tower-enemy-box{min-width:0}
+.tower-enemy-image{
+  width:100%;aspect-ratio:1/1;max-height:170px;object-fit:cover;border-radius:9px;margin-bottom:8px
+}
+.cheese-pool-grid{
+  grid-template-columns:repeat(5,minmax(0,1fr));gap:7px
+}
+.cheese-card{
+  grid-template-columns:minmax(0,1fr) 48px;gap:7px;padding:8px 9px;min-width:0
+}
+.cheese-card>div{min-width:0}
+.cheese-card button{height:28px;padding:0 6px}
+.cheese-card-image{display:none!important}
+
+/* Full Depths controls */
+.depths-title-row{display:flex;align-items:flex-end;justify-content:space-between;gap:12px}
+.depth-page-actions{display:flex;gap:6px}
+.depth-team-tabs-actions{grid-template-columns:repeat(5,minmax(0,1fr)) minmax(90px,.65fr)}
+.depth-duplicate-tab{border-style:dashed!important}
+.panel-head-actions{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.text-mini{
+  border:0;background:transparent;color:#aeb9c5;padding:3px 5px;font-size:7px;font-weight:700;cursor:pointer
+}
+.text-mini:hover{color:var(--accent)}
+.text-mini.danger:hover{color:#e4a4aa}
+.depth-slot.dragging{opacity:.45}
+.depth-slot.drop-target{outline:1px dashed var(--accent);outline-offset:2px}
+
+.depth-ban-box{
+  border:1px solid var(--line-card);background:var(--surface-1);border-radius:10px;padding:9px;margin-top:3px
+}
+.depth-ban-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.depth-ban-top>div{display:flex;align-items:center;gap:7px}
+.depth-ban-top span{font-size:8px;font-weight:800;color:#dce4ec}
+.depth-ban-top b{font-size:8px;color:var(--accent)}
+.depth-ban-top>button,.depth-ban-actions button{
+  border:1px solid var(--line-soft);border-radius:7px;background:var(--surface-2);color:var(--muted);padding:5px 7px;font-size:7px;cursor:pointer
+}
+.depth-ban-layout-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-top:8px}
+.depth-ban-layout-tabs button{
+  border:1px solid var(--line-soft);border-radius:7px;background:var(--surface-2);color:#aeb8c3;padding:6px;font-size:7px;cursor:pointer
+}
+.depth-ban-layout-tabs button.on{border-color:var(--accent-line);background:var(--accent-deep);color:var(--accent)}
+.depth-ban-layout-tabs small{display:block;color:var(--muted);font-size:6px;margin-top:2px}
+.depth-ban-actions{display:flex;gap:5px;margin-top:6px}
+.depth-ban-help{display:block;color:var(--muted);font-size:7px;line-height:1.4;margin-top:7px}
+.depth-ban-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}
+.depth-ban-chips button{
+  border:1px solid var(--accent-line);border-radius:999px;background:var(--accent-soft);color:#cfece7;
+  padding:4px 6px;font-size:7px;cursor:pointer
+}
+.depth-ban-search{position:relative;margin-top:7px}
+.depth-ban-search>input{
+  width:100%;border:1px solid var(--line-soft);border-radius:8px;background:var(--surface-2);color:var(--text);
+  padding:8px 9px;font-size:8px;outline:none
+}
+.depth-ban-search>input:focus{border-color:var(--accent-line)}
+.depth-ban-suggestions{
+  position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;max-height:220px;overflow:auto;
+  border:1px solid var(--line);border-radius:8px;background:#161d25;box-shadow:0 12px 30px rgba(0,0,0,.35);padding:4px
+}
+.depth-ban-suggestions>button{
+  width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;border:0;border-radius:6px;
+  background:transparent;color:var(--text);padding:7px;text-align:left;cursor:pointer
+}
+.depth-ban-suggestions>button:hover{background:var(--surface-hover)}
+.depth-ban-suggestions span{font-size:8px;font-weight:700}
+.depth-ban-suggestions small{font-size:7px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.depth-ban-suggestions>small{display:block;padding:8px;color:var(--muted);font-size:7px}
+
+.depth-result-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px}
+.depth-result-metrics>div{
+  border:1px solid var(--line-card);background:var(--surface-1);border-radius:8px;padding:7px
+}
+.depth-result-metrics span,.depth-result-metrics b,.depth-result-metrics small{display:block}
+.depth-result-metrics span{font-size:6px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.depth-result-metrics b{font-size:10px;margin-top:3px}
+.depth-result-metrics small{font-size:6px;color:var(--muted);margin-top:2px}
+.depth-rewards{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:7px}
+.depth-rewards span{
+  border:1px solid var(--line-card);background:var(--surface-1);border-radius:7px;padding:6px;color:var(--muted);font-size:7px
+}
+.depth-rewards b{color:#e7edf2}
+.depth-floor-strip{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}
+.depth-floor-strip button{
+  border:1px solid var(--line-soft);background:var(--surface-1);color:#c5d0da;border-radius:6px;padding:4px 6px;font-size:7px;cursor:pointer
+}
+.depth-floor-strip button:hover{border-color:var(--accent-line);color:var(--accent)}
+.depth-common-enemies{margin-top:7px}
+.depth-common-enemies>span{display:block;color:var(--muted);font-size:7px;margin-bottom:4px}
+.depth-common-enemies>div{display:flex;flex-wrap:wrap;gap:4px}
+.depth-common-enemies i{
+  font-style:normal;border:1px solid var(--line-card);background:var(--surface-1);border-radius:999px;padding:4px 6px;color:#bac5cf;font-size:7px
+}
+
+@media(max-width:1180px){
+  .cheese-pool-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .depth-team-tabs-actions{grid-template-columns:repeat(3,1fr)}
+  .depth-result-metrics{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:760px){
+  .cheese-pool-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .depths-title-row{align-items:flex-start;flex-direction:column}
+  .depth-team-tabs-actions{grid-template-columns:repeat(2,1fr)}
+  .panel-head{align-items:flex-start}
+  .panel-head-actions{justify-content:flex-start}
+}
+@media(max-width:480px){
+  .cheese-pool-grid{grid-template-columns:1fr}
+  .depth-result-metrics,.depth-rewards{grid-template-columns:1fr}
+}
