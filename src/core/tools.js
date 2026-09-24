@@ -29,7 +29,7 @@ export const tools = [
     name: 'Card Library',
     icon: '◇',
     description: 'Search the full Card RNG Expansion card catalog.',
-    status: 'planned',
+    status: 'ready',
   },
   {
     id: 'deck-helper',
@@ -37,7 +37,7 @@ export const tools = [
     name: 'Deck Helper',
     icon: '▤',
     description: 'Build and optimize decks from the same saved inventory.',
-    status: 'port',
+    status: 'ready',
   },
   {
     id: 'depths',
@@ -45,7 +45,7 @@ export const tools = [
     name: 'Depths',
     icon: '▼',
     description: 'Depths calculator, optimizer and progression tools.',
-    status: 'port',
+    status: 'ready',
   },
   {
     id: 'tower',
@@ -53,7 +53,7 @@ export const tools = [
     name: 'Tower',
     icon: '▲',
     description: 'Tower simulator and Cheese Maker.',
-    status: 'port',
+    status: 'ready',
   },
   {
     id: 'calculators',
@@ -61,7 +61,7 @@ export const tools = [
     name: 'Calculators',
     icon: '∑',
     description: 'Luck, roll speed, rarity and progression calculators.',
-    status: 'planned',
+    status: 'ready',
   },
 ]
 
