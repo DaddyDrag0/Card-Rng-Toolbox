@@ -1248,6 +1248,13 @@ function clearDepthResult(index) {
   delete depthsResults[index]
 }
 
+function cancelDepthsRuns() {
+  for (const worker of depthsWorkers.values()) worker.terminate()
+  depthsWorkers.clear()
+  for (const key of Object.keys(depthsProgress)) delete depthsProgress[key]
+  render()
+}
+
 function startDepthsRuns(indices) {
   const state = depthsToolState()
   for (const index of indices) {
@@ -1559,6 +1566,174 @@ function bind() {
   document.querySelectorAll('[data-depth-team]').forEach(button => button.addEventListener('click', () => {
     updateDepthsToolState(state => { state.activeTeam = Number(button.dataset.depthTeam); state.activeSlot = 0 })
   }))
+  document.querySelector('[data-depth-duplicate]')?.addEventListener('click', () => {
+    const current = depthsToolState()
+    const sourceIndex = current.activeTeam
+    const destination = (sourceIndex + 1) % 5
+    clearDepthResult(destination)
+    updateDepthsToolState(state => {
+      const source = state.teams[sourceIndex]
+      state.teams[destination] = structuredClone(source)
+      state.activeTeam = destination
+      state.activeSlot = 0
+    })
+  })
+
+  document.querySelector('[data-depth-copy-team]')?.addEventListener('click', async () => {
+    const code = encodeDepthTeam(depthsToolState().teams[depthsToolState().activeTeam])
+    try {
+      await navigator.clipboard.writeText(code)
+    } catch {
+      prompt('Copy this team code:', code)
+    }
+  })
+
+  document.querySelector('[data-depth-import-team]')?.addEventListener('click', () => {
+    const code = prompt('Paste a CRE1 team code:')
+    if (!code) return
+    try {
+      const imported = decodeDepthTeam(code)
+      const index = depthsToolState().activeTeam
+      clearDepthResult(index)
+      updateDepthsToolState(state => {
+        state.teams[index] = imported
+        state.activeSlot = 0
+      })
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  document.querySelector('[data-depth-clear-team]')?.addEventListener('click', () => {
+    const index = depthsToolState().activeTeam
+    clearDepthResult(index)
+    updateDepthsToolState(state => {
+      state.teams[index] = {
+        cards: Array.from({ length: 4 }, () => ({ cardName: '', borders: [], mutationWeather: '' })),
+        statAura: '', statAuraBorder: '', abilityAura: '', abilityAuraBorder: '',
+      }
+      state.activeSlot = 0
+    })
+  })
+
+  document.querySelector('[data-depth-clear-results]')?.addEventListener('click', () => {
+    for (const key of Object.keys(depthsResults)) delete depthsResults[key]
+    render()
+  })
+
+  document.querySelectorAll('[data-depth-ban-layout]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => {
+      state.activeDepthBanLayout = Number(button.dataset.depthBanLayout)
+      state.depthBanQuery = ''
+    })
+  }))
+
+  document.querySelector('[data-depth-ban-clear]')?.addEventListener('click', () => {
+    updateDepthsToolState(state => {
+      state.depthBanLayouts[state.activeDepthBanLayout] = []
+      state.depthBanQuery = ''
+    })
+    for (const key of Object.keys(depthsResults)) delete depthsResults[key]
+  })
+
+  document.querySelectorAll('[data-depth-ban-remove]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => {
+      const list = [...state.depthBanLayouts[state.activeDepthBanLayout]]
+      list.splice(Number(button.dataset.depthBanRemove), 1)
+      state.depthBanLayouts[state.activeDepthBanLayout] = list
+    })
+    for (const key of Object.keys(depthsResults)) delete depthsResults[key]
+  }))
+
+  document.querySelectorAll('[data-depth-ban-add]').forEach(button => button.addEventListener('click', () => {
+    updateDepthsToolState(state => {
+      const list = sanitizeDepthBans(state.depthBanLayouts[state.activeDepthBanLayout] || [])
+      if (list.length < MAX_DEPTH_BANS && !list.includes(button.dataset.depthBanAdd)) list.push(button.dataset.depthBanAdd)
+      state.depthBanLayouts[state.activeDepthBanLayout] = sanitizeDepthBans(list)
+      state.depthBanQuery = ''
+    })
+    for (const key of Object.keys(depthsResults)) delete depthsResults[key]
+  }))
+
+  document.querySelector('[data-depth-ban-export]')?.addEventListener('click', async () => {
+    const state = depthsToolState()
+    const code = encodeDepthBans(state.depthBanLayouts[state.activeDepthBanLayout] || [])
+    try {
+      await navigator.clipboard.writeText(code)
+    } catch {
+      prompt('Copy this ban code:', code)
+    }
+  })
+
+  document.querySelector('[data-depth-ban-import]')?.addEventListener('click', () => {
+    const code = prompt('Paste a CRB1 ban code:')
+    if (!code) return
+    try {
+      const bans = decodeDepthBans(code)
+      updateDepthsToolState(state => {
+        state.depthBanLayouts[state.activeDepthBanLayout] = bans
+        state.depthBanQuery = ''
+      })
+      for (const key of Object.keys(depthsResults)) delete depthsResults[key]
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  const depthBanSearch = document.querySelector('#depthBanSearch')
+  if (depthBanSearch) depthBanSearch.oninput = () => {
+    updateDepthsToolState(state => { state.depthBanQuery = depthBanSearch.value })
+    requestAnimationFrame(() => {
+      const next = document.querySelector('#depthBanSearch')
+      next?.focus()
+      next?.setSelectionRange(next.value.length, next.value.length)
+    })
+  }
+
+  document.querySelector('[data-depth-cancel]')?.addEventListener('click', cancelDepthsRuns)
+
+  document.querySelectorAll('[data-depth-run-detail]').forEach(button => button.addEventListener('click', () => {
+    const [teamIndex, runIndex] = String(button.dataset.depthRunDetail).split(':').map(Number)
+    const run = depthsResults[teamIndex]?.runs?.[runIndex]
+    if (!run) return
+    const enemyText = run.endingEnemies?.length ? '\nEnemies: ' + run.endingEnemies.join(' / ') : ''
+    const turnLimit = run.turnLimitEnemy ? '\nTurn limit: ' + run.turnLimitEnemy : ''
+    alert('Team ' + (teamIndex + 1) + ' · Run ' + (runIndex + 1) + '\nDeath floor: ' + Number(run.deathFloor).toLocaleString() + '\nBattles: ' + Number(run.battles || 0).toLocaleString() + '\nTurns: ' + Number(run.totalTurns || 0).toLocaleString() + enemyText + turnLimit)
+  }))
+
+  let draggedDepthSlot = null
+  document.querySelectorAll('[data-depth-slot]').forEach(button => {
+    button.addEventListener('dragstart', event => {
+      draggedDepthSlot = Number(button.dataset.depthSlot)
+      button.classList.add('dragging')
+      event.dataTransfer?.setData('text/plain', String(draggedDepthSlot))
+    })
+    button.addEventListener('dragover', event => {
+      if (draggedDepthSlot === null) return
+      event.preventDefault()
+      button.classList.add('drop-target')
+    })
+    button.addEventListener('dragleave', () => button.classList.remove('drop-target'))
+    button.addEventListener('drop', event => {
+      event.preventDefault()
+      const to = Number(button.dataset.depthSlot)
+      const from = draggedDepthSlot
+      draggedDepthSlot = null
+      document.querySelectorAll('[data-depth-slot]').forEach(el => el.classList.remove('dragging','drop-target'))
+      if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) return
+      clearDepthResult(depthsToolState().activeTeam)
+      updateDepthsToolState(state => {
+        const cards = state.teams[state.activeTeam].cards
+        ;[cards[from], cards[to]] = [cards[to], cards[from]]
+        state.activeSlot = to
+      })
+    })
+    button.addEventListener('dragend', () => {
+      draggedDepthSlot = null
+      document.querySelectorAll('[data-depth-slot]').forEach(el => el.classList.remove('dragging','drop-target'))
+    })
+  })
+
   document.querySelectorAll('[data-depth-slot]').forEach(button => button.addEventListener('click', () => {
     updateDepthsToolState(state => { state.activeSlot = Number(button.dataset.depthSlot) })
   }))
@@ -1579,6 +1754,7 @@ function bind() {
     })
   }))
   document.querySelector('#depthMutation')?.addEventListener('change', event => {
+    clearDepthResult(depthsToolState().activeTeam)
     updateDepthsToolState(state => { state.teams[state.activeTeam].cards[state.activeSlot].mutationWeather = event.target.value })
   })
   document.querySelector('#depthStatAura')?.addEventListener('change', event => { clearDepthResult(depthsToolState().activeTeam); updateDepthsToolState(state => { state.teams[state.activeTeam].statAura = event.target.value }) })
@@ -1597,11 +1773,11 @@ function bind() {
     })
   }
   document.querySelector('#depthRuns')?.addEventListener('change', event => updateDepthsToolState(state => { state.runs = Number(event.target.value) }))
-  document.querySelector('#depthStartFloor')?.addEventListener('change', event => updateDepthsToolState(state => { state.startFloor = Math.min(40000, Math.max(1, Math.floor(Number(event.target.value)||1))) }))
-  document.querySelector('#depthStructureLevel')?.addEventListener('change', event => updateDepthsToolState(state => { state.battleSpeedStructureLevel = Number(event.target.value)||0 }))
-  document.querySelector('#depthSkillLevel')?.addEventListener('change', event => updateDepthsToolState(state => { state.skillTreeBattleSpeedLevel = Number(event.target.value)||0 }))
-  document.querySelector('[data-depth-chrono]')?.addEventListener('click', () => updateDepthsToolState(state => { state.chronoShard = !state.chronoShard }))
-  document.querySelector('[data-depth-bountiful]')?.addEventListener('click', () => updateDepthsToolState(state => { state.bountifulDepths = !state.bountifulDepths }))
+  document.querySelector('#depthStartFloor')?.addEventListener('change', event => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.startFloor = Math.min(40000, Math.max(1, Math.floor(Number(event.target.value)||1))) }) })
+  document.querySelector('#depthStructureLevel')?.addEventListener('change', event => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.battleSpeedStructureLevel = Number(event.target.value)||0 }) })
+  document.querySelector('#depthSkillLevel')?.addEventListener('change', event => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.skillTreeBattleSpeedLevel = Number(event.target.value)||0 }) })
+  document.querySelector('[data-depth-chrono]')?.addEventListener('click', () => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.chronoShard = !state.chronoShard }) })
+  document.querySelector('[data-depth-bountiful]')?.addEventListener('click', () => { for (const key of Object.keys(depthsResults)) delete depthsResults[key]; updateDepthsToolState(state => { state.bountifulDepths = !state.bountifulDepths }) })
   document.querySelector('[data-depth-run-active]')?.addEventListener('click', () => startDepthsRuns([depthsToolState().activeTeam]))
   document.querySelector('[data-depth-run-ready]')?.addEventListener('click', () => {
     const state = depthsToolState()
