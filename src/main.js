@@ -15,10 +15,14 @@ let libraryOwned = 'all'
 let deckInventoryQuery = ''
 let deckWorker = null
 let deckProgress = null
+let deckLastProgressRender = 0
 let deckResults = []
 let deckError = ''
 let towerWorker = null
 let towerRequestId = 0
+let towerSearchWorkers = []
+let towerSearchToken = 0
+let towerSearchLastRender = 0
 let towerFloor = 105
 let towerDifficulty = 'Impossible'
 let towerEnemies = ["Heaven's Armor","Hell's Army",'Judgment Day','Sable The Envious']
@@ -29,6 +33,7 @@ let depthsQuery = ''
 let depthRequestId = 0
 const depthsWorkers = new Map()
 const depthsProgress = {}
+const depthsLastProgressRender = new Map()
 const depthsResults = {}
 
 fetch('./src/data/cards.json?v=2', { cache: 'no-store' })
@@ -1385,6 +1390,7 @@ function cancelDepthsRuns() {
   for (const worker of depthsWorkers.values()) worker.terminate()
   depthsWorkers.clear()
   for (const key of Object.keys(depthsProgress)) delete depthsProgress[key]
+  depthsLastProgressRender.clear()
   render()
 }
 
@@ -1393,7 +1399,7 @@ function startDepthsRuns(indices) {
   for (const index of indices) {
     if (!depthsTeamReady(state.teams[index])) continue
     depthsWorkers.get(index)?.terminate()
-    const worker = new Worker('./assets/depths-worker.js?v=1')
+    const worker = new Worker('./assets/depths-worker.js?v=2')
     depthsWorkers.set(index, worker)
     const id = ++depthRequestId
     depthsProgress[index] = { completedRuns: 0, totalRuns: state.runs }
@@ -1403,12 +1409,18 @@ function startDepthsRuns(indices) {
       if (message.id !== id) return
       if (message.kind === 'progress') {
         depthsProgress[index] = message
-        if (route === 'depths') render()
+        const now = performance.now()
+        const last = depthsLastProgressRender.get(index) || 0
+        if (route === 'depths' && now - last > 250) {
+          depthsLastProgressRender.set(index, now)
+          render()
+        }
         return
       }
       if (message.ok) depthsResults[index] = message.result
       else depthsResults[index] = { error: message.error || 'Simulation failed' }
       delete depthsProgress[index]
+      depthsLastProgressRender.delete(index)
       worker.terminate()
       depthsWorkers.delete(index)
       if (route === 'depths') render()
@@ -1455,13 +1467,18 @@ function startDeckSearch() {
   }
   deckError = ''
   deckResults = []
+  deckLastProgressRender = 0
   deckProgress = { phase: 'prepare', message: 'Starting search…', simulations: 0, possibleCombinations: 1 }
-  deckWorker = new Worker('./assets/optimizer-worker.js?v=1')
+  deckWorker = new Worker('./assets/optimizer-worker.js?v=2')
   deckWorker.onmessage = event => {
     const message = event.data || {}
     if (message.type === 'progress') {
       deckProgress = message.progress
-      if (route === 'deck-helper') render()
+      const now = performance.now()
+      if (route === 'deck-helper' && now - deckLastProgressRender > 180) {
+        deckLastProgressRender = now
+        render()
+      }
       return
     }
     if (message.type === 'search-result') {
@@ -1499,7 +1516,52 @@ function startDeckSearch() {
   render()
 }
 
+function combineTowerSearchResults(results) {
+  const recommendations = []
+  const candidatePool = new Set()
+  let combinations = 0
+  let battleSimulations = 0
+
+  for (const result of results) {
+    if (!result) continue
+    combinations += Number(result.combinations) || 0
+    battleSimulations += Number(result.battleSimulations) || 0
+    for (const name of result.candidatePool || []) candidatePool.add(name)
+    for (const rec of result.recommendations || []) recommendations.push(rec)
+  }
+
+  recommendations.sort((a,b) =>
+    (Number(b.winRate)||0) - (Number(a.winRate)||0) ||
+    (Number(b.progress)||0) - (Number(a.progress)||0) ||
+    (Number(a.averageTurns)||0) - (Number(b.averageTurns)||0)
+  )
+
+  const seen = new Set()
+  const unique = []
+  for (const rec of recommendations) {
+    const key = JSON.stringify({
+      cards: rec.loadout?.cards?.map(card => [card.cardName, card.borders || [], card.mutationWeather || null]),
+      aura: rec.loadout?.abilityAura || null,
+    })
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(rec)
+    if (unique.length >= 10) break
+  }
+
+  return {
+    recommendations: unique,
+    anchorCards: [],
+    candidatePool: [...candidatePool],
+    combinations,
+    battleSimulations,
+  }
+}
+
 function cancelTowerSearch() {
+  towerSearchToken += 1
+  for (const worker of towerSearchWorkers) worker.terminate()
+  towerSearchWorkers = []
   if (towerWorker) towerWorker.terminate()
   towerWorker = null
   towerProgress = null
@@ -1521,50 +1583,103 @@ function startTowerSearch() {
     return
   }
 
-  const hasEndTimes = true
   towerError = ''
   towerResult = null
-  towerProgress = { phase: 'exhaustive', completed: 0, total: 1, battleSimulations: 0 }
-  const requestId = ++towerRequestId
-  towerWorker = new Worker('./assets/tower-worker.js?v=1')
-  towerWorker.onmessage = event => {
-    const message = event.data || {}
-    if (message.id !== requestId) return
-    if (message.kind === 'tower-cheese-progress') {
-      towerProgress = message
-      if (route === 'tower') render()
-      return
-    }
-    if (message.kind === 'tower-cheese-result') {
-      if (message.ok) towerResult = message.result
-      else towerError = message.error || 'Tower search failed.'
-      towerProgress = null
-      towerWorker?.terminate()
-      towerWorker = null
-      if (route === 'tower') render()
+  const token = ++towerSearchToken
+  const workerCount = Math.min(8, Math.max(2, Number(navigator.hardwareConcurrency) || 4))
+  const results = Array(workerCount).fill(null)
+  const progress = Array.from({length: workerCount}, () => ({completed:0,total:0,battleSimulations:0}))
+  let finished = 0
+  let failed = false
+  towerSearchLastRender = 0
+  towerProgress = { phase:'exhaustive', completed:0, total:0, battleSimulations:0, workers:workerCount }
+
+  for (const worker of towerSearchWorkers) worker.terminate()
+  towerSearchWorkers = []
+
+  const refreshProgress = phase => {
+    const completed = progress.reduce((sum,item)=>sum+(Number(item.completed)||0),0)
+    const total = progress.reduce((sum,item)=>sum+(Number(item.total)||0),0)
+    const battles = progress.reduce((sum,item)=>sum+(Number(item.battleSimulations)||0),0)
+    towerProgress = { phase:phase || 'exhaustive', completed, total, battleSimulations:battles, workers:workerCount }
+    const now = performance.now()
+    if (route === 'tower' && now - towerSearchLastRender > 120) {
+      towerSearchLastRender = now
+      render()
     }
   }
-  towerWorker.onerror = event => {
-    towerError = event.message || 'Tower search worker failed.'
-    towerProgress = null
-    towerWorker?.terminate()
+
+  const fail = message => {
+    if (failed || token !== towerSearchToken) return
+    failed = true
+    for (const worker of towerSearchWorkers) worker.terminate()
+    towerSearchWorkers = []
     towerWorker = null
+    towerProgress = null
+    towerError = message || 'Parallel Tower cheese search failed.'
     if (route === 'tower') render()
   }
-  towerWorker.postMessage({
-    id: requestId,
-    kind: 'tower-cheese-search',
-    enemyNames: [...towerEnemies],
-    floor: towerFloor,
-    difficulty: towerDifficulty,
-    seed: Date.now() >>> 0,
-    intensive: true,
-    excludedCards,
-    addedCards: [],
-    hasEndTimes,
-  })
+
+  for (let shardIndex=0; shardIndex<workerCount; shardIndex++) {
+    const worker = new Worker('./assets/tower-worker.js?v=2')
+    towerSearchWorkers.push(worker)
+
+    worker.onmessage = event => {
+      if (failed || token !== towerSearchToken) return
+      const message = event.data || {}
+      if (message.kind === 'tower-cheese-progress') {
+        progress[shardIndex] = {
+          completed: message.completed || 0,
+          total: message.total || 0,
+          battleSimulations: message.battleSimulations || 0,
+        }
+        refreshProgress(message.phase)
+        return
+      }
+      if (message.kind !== 'tower-cheese-result') return
+      if (!message.ok) {
+        fail(message.error)
+        return
+      }
+
+      results[shardIndex] = message.result
+      finished += 1
+      worker.terminate()
+
+      if (finished < workerCount) {
+        refreshProgress('verify')
+        return
+      }
+
+      towerSearchWorkers = []
+      towerProgress = null
+      towerResult = combineTowerSearchResults(results)
+      if (route === 'tower') render()
+    }
+
+    worker.onerror = event => fail(event.message || 'Parallel Tower cheese search worker failed.')
+
+    const shardSeed = ((Date.now() >>> 0) ^ Math.imul(shardIndex + 1, 0x9e3779b1)) >>> 0
+    worker.postMessage({
+      id: token,
+      kind: 'tower-cheese-search',
+      enemyNames: [...towerEnemies],
+      floor: towerFloor,
+      difficulty: towerDifficulty,
+      seed: shardSeed || 1,
+      intensive: true,
+      excludedCards,
+      addedCards: [],
+      hasEndTimes: true,
+      shardIndex,
+      shardCount: workerCount,
+    })
+  }
+
+  refreshProgress('exhaustive')
   render()
 }
+
 
 function updateRollCalculator() {
   const input = document.querySelector('#rollSpeedBonus')
