@@ -1301,6 +1301,82 @@ function saveJson() {
   }
 }
 
+function showDepthsRunDebug(teamIndex,runIndex){
+    const run=depthsResults[teamIndex]?.runs?.[runIndex],d=run?.debug;if(!run)return;
+    const fmt=n=>Number.isFinite(Number(n))?Math.round(Number(n)).toLocaleString('en-US'):'?';
+    const compactDbg=n=>Number.isFinite(Number(n))?Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(Number(n)).replace(/\s/g,'').toLowerCase():'?';
+    const compactText=value=>String(value??'').replace(/-?\b\d{4,}(?:\.\d+)?\b/g,raw=>compactDbg(Number(raw)));
+    const side=t=>t==='Allies'?'PLAYER':'ENEMY';
+    const visibleEvents=()=>d?.events||[];
+    const matchCard=c=>`<div class="dbg-match-card"><div><b>${esc(c.name)}</b><small>${esc(c.ability||'No ability')}</small></div><span>${compactDbg(c.hp)} HP · ${compactDbg(c.damage)} ATK</span></div>`;
+    const matchTeam=(list,label,kind)=>`<section class="dbg-match-team ${kind}"><div class="dbg-match-team-title">${label}</div><div class="dbg-match-cards">${list?.length?list.map(matchCard).join(''):'<div class="dbg-match-empty">No cards</div>'}</div></section>`;
+    const auraLine=()=>{const parts=[];if(d?.statAura)parts.push(`Stat Aura: ${esc(d.statAura.name)} · ${esc(d.statAura.border||'Base')}`);if(d?.abilityAura)parts.push(`Ability Aura: ${esc(d.abilityAura.name)} · ${esc(d.abilityAura.border||'Base')}`);return parts.length?`<div class="dbg-aura-line">${parts.join('<span>•</span>')}</div>`:''};
+    const parseTurn=e=>{
+      const m=String(e.detail||'').match(/^vs (.*?) \| attacker ([\d.-]+)\/([\d.-]+) HP ([\d.-]+) ATK \| defender ([\d.-]+)\/([\d.-]+) HP ([\d.-]+) ATK$/);
+      if(!m)return null;
+      return {target:m[1],aHp:Number(m[2]),aMax:Number(m[3]),aAtk:Number(m[4]),dHp:Number(m[5]),dMax:Number(m[6]),dAtk:Number(m[7])};
+    };
+    const hpPct=(hp,max)=>Math.max(0,Math.min(100,max>0?hp/max*100:0));
+    const fightCard=(name,hp,max,atk,align='left')=>`<div class="dbg-fighter ${align}"><div class="dbg-fighter-top"><b>${esc(name)}</b><span>${compactDbg(hp)} / ${compactDbg(max)} HP</span></div><div class="dbg-hp"><i style="width:${hpPct(hp,max)}%"></i></div><div class="dbg-fighter-atk">${compactDbg(atk)} ATK</div></div>`;
+    const eventLine=e=>{
+      if(e.type==='ability')return `<div class="dbg-interaction ability"><span>ABILITY</span><b>${esc(e.card)}</b><p>${esc(compactText(e.detail||''))}</p></div>`;
+      if(e.type==='death')return `<div class="dbg-interaction death"><span>DEATH</span><b>${esc(e.card)}</b><p>${esc(compactText(e.detail||'Card defeated'))}</p></div>`;
+      if(e.type==='revive')return `<div class="dbg-interaction revive"><span>REVIVE</span><b>${esc(e.card)}</b><p>${esc(compactText(e.detail||''))}</p></div>`;
+      if(e.type==='spawn')return `<div class="dbg-interaction spawn"><span>SPAWN</span><b>${esc(e.card)}</b><p>${esc(compactText(e.detail||''))}</p></div>`;
+      if(e.type==='stall')return `<div class="dbg-interaction stall"><span>STALL</span><b>${esc(e.card)}</b><p>${esc(compactText(e.detail||''))}</p></div>`;
+      return '';
+    };
+    const buildTimeline=()=>{
+      const groups=[];
+      for(const e of visibleEvents()){
+        let group=groups[groups.length-1];
+        if(!group||group.turn!==e.turn){group={turn:e.turn,events:[]};groups.push(group)}
+        group.events.push(e);
+      }
+      return groups.map(group=>{
+        const turnEvent=group.events.find(e=>e.type==='turn');
+        const parsed=turnEvent?parseTurn(turnEvent):null;
+        const extras=group.events.filter(e=>e.type!=='turn').map(eventLine).join('');
+        let fight='';
+        if(turnEvent&&parsed){
+          const playerAttacking=turnEvent.team==='Allies';
+          fight=playerAttacking
+            ?`<div class="dbg-fight player-attack">${fightCard(turnEvent.card,parsed.aHp,parsed.aMax,parsed.aAtk,'player')}<div class="dbg-vs"><i>→</i></div>${fightCard(parsed.target,parsed.dHp,parsed.dMax,parsed.dAtk,'enemy')}</div>`
+            :`<div class="dbg-fight enemy-attack">${fightCard(parsed.target,parsed.dHp,parsed.dMax,parsed.dAtk,'player')}<div class="dbg-vs"><i>←</i></div>${fightCard(turnEvent.card,parsed.aHp,parsed.aMax,parsed.aAtk,'enemy')}</div>`;
+        }else if(turnEvent){
+          fight=`<div class="dbg-fight-simple"><b>${esc(turnEvent.card)}</b><span>${esc(compactText(turnEvent.detail||''))}</span></div>`;
+        }
+        return `<section class="dbg-turn"><div class="dbg-turn-head"><b>TURN ${group.turn}</b>${turnEvent?`<span class="${turnEvent.team==='Allies'?'player':'enemy'}">${side(turnEvent.team)} TURN</span>`:'<span></span>'}<i></i></div>${fight}${extras?`<div class="dbg-interactions">${extras}</div>`:''}</section>`;
+      }).join('')||'<div class="dbg-empty">No battle events captured.</div>';
+    };
+    const plainText=()=>{
+      const lines=[];
+      lines.push(`TEAM ${teamIndex+1} · RUN ${runIndex+1} · DEATH FLOOR ${fmt(run.deathFloor)}`);
+      let last=null;
+      for(const e of visibleEvents()){
+        if(e.turn!==last){last=e.turn;lines.push('',`TURN ${e.turn}`)}
+        const parsed=e.type==='turn'?parseTurn(e):null;
+        if(parsed){
+          lines.push(`  ${side(e.team)} · ${e.card} → ${parsed.target}`);
+          lines.push(`    ${e.card}: ${compactDbg(parsed.aHp)}/${compactDbg(parsed.aMax)} HP · ${compactDbg(parsed.aAtk)} ATK`);
+          lines.push(`    ${parsed.target}: ${compactDbg(parsed.dHp)}/${compactDbg(parsed.dMax)} HP · ${compactDbg(parsed.dAtk)} ATK`);
+        }else if(e.type!=='turn'){
+          lines.push(`  [${e.type.toUpperCase()}] ${e.card}: ${compactText(e.detail||'')}`);
+        }
+      }
+      return lines.join('\n');
+    };
+    const dialog=document.createElement('dialog');dialog.className='dbg-dialog';
+    dialog.innerHTML=`<div class="dbg-shell"><div class="dbg-head"><div><span class="dbg-kicker">BATTLE DEBUG</span><h3>Team ${teamIndex+1} · Run ${runIndex+1}</h3><div class="dbg-sub">Death floor ${fmt(run.deathFloor)}</div></div><div class="dbg-actions"><button data-dbg-copy>Copy debug</button><button data-dbg-close>Close</button></div></div><div class="dbg-scroll"><div class="dbg-matchup">${matchTeam(d?.initialAllies,'YOUR TEAM','player')}<div class="dbg-match-vs">VS</div>${matchTeam(d?.initialEnemies,'ENEMY TEAM','enemy')}</div>${auraLine()}<div data-dbg-timeline></div></div></div>`;
+    document.body.appendChild(dialog);
+    const timeline=dialog.querySelector('[data-dbg-timeline]'),copy=dialog.querySelector('[data-dbg-copy]'),close=dialog.querySelector('[data-dbg-close]');
+    timeline.innerHTML=buildTimeline();
+    dialog.showModal();
+    copy.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(plainText());copy.textContent='Copied!';setTimeout(()=>{if(copy.isConnected)copy.textContent='Copy debug'},900)}catch(_){}});
+    close.addEventListener('click',()=>{dialog.close();dialog.remove()});
+    dialog.addEventListener('cancel',()=>dialog.remove());
+  }
+
 function clearDepthResult(index) {
   delete depthsResults[index]
 }
@@ -1751,11 +1827,7 @@ function bind() {
 
   document.querySelectorAll('[data-depth-run-detail]').forEach(button => button.addEventListener('click', () => {
     const [teamIndex, runIndex] = String(button.dataset.depthRunDetail).split(':').map(Number)
-    const run = depthsResults[teamIndex]?.runs?.[runIndex]
-    if (!run) return
-    const enemyText = run.endingEnemies?.length ? '\nEnemies: ' + run.endingEnemies.join(' / ') : ''
-    const turnLimit = run.turnLimitEnemy ? '\nTurn limit: ' + run.turnLimitEnemy : ''
-    alert('Team ' + (teamIndex + 1) + ' · Run ' + (runIndex + 1) + '\nDeath floor: ' + Number(run.deathFloor).toLocaleString() + '\nBattles: ' + Number(run.battles || 0).toLocaleString() + '\nTurns: ' + Number(run.totalTurns || 0).toLocaleString() + enemyText + turnLimit)
+    showDepthsRunDebug(teamIndex, runIndex)
   }))
 
   let draggedDepthSlot = null
