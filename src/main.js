@@ -384,9 +384,13 @@ function cardLibraryPage() {
         <div class="card-library-grid">
           ${shown.map(card => {
             const stats = baseCardStats(card)
+            const artUrl = cardImageUrl(card)
             return `
               <article class="library-card">
-                <div class="library-card-art">${cardImage(card,'library-card-image')}</div>
+                <div class="library-card-art">
+                  ${artUrl ? `<img class="library-card-backdrop" src="${esc(artUrl)}" alt="" loading="lazy" aria-hidden="true">` : ''}
+                  ${cardImage(card,'library-card-image')}
+                </div>
                 <div class="library-card-content">
                   <div class="library-card-top">
                     <strong>${esc(card.name)}</strong>
