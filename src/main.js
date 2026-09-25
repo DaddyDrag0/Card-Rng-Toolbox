@@ -113,6 +113,18 @@ function compactNumber(value) {
   return Math.round(number).toLocaleString()
 }
 
+const RARITY_SUFFIXES = [
+  [1e33,'Dc'], [1e30,'No'], [1e27,'Oc'], [1e24,'Sp'], [1e21,'Sx'],
+  [1e18,'Qi'], [1e15,'Qa'], [1e12,'T'], [1e9,'B'], [1e6,'M'], [1e3,'K'],
+]
+function rarityCompact(value) {
+  const number = Number(value) || 0
+  for (const [size,suffix] of RARITY_SUFFIXES) {
+    if (Math.abs(number) >= size) return Number((number / size).toFixed(2)) + suffix
+  }
+  return Number.isInteger(number) ? String(number) : Number(number.toFixed(2)).toString()
+}
+
 
 function activeProfile() {
   return store.activeProfile()
@@ -378,7 +390,7 @@ function cardLibraryPage() {
                 <div class="library-card-content">
                   <div class="library-card-top">
                     <strong>${esc(card.name)}</strong>
-                    <span>1 / ${Number(card.rarity || 0).toLocaleString()}</span>
+                    <span>1 / ${rarityCompact(card.rarity || 0)}</span>
                   </div>
                   <div class="library-ability">
                     <b>${esc(card.ability || 'No ability')}</b>
@@ -1153,7 +1165,7 @@ function depthsPage() {
               <button data-depth-card="${esc(card.name)}" data-tooltip-card="${esc(card.name)}" class="${team.cards[state.activeSlot]?.cardName===card.name?'selected':''}">
                 ${cardImage(card,'depths-exact-mini-portrait')}
                 <span><b>${esc(card.name)}</b><small>${esc(card.ability || 'No ability')}</small></span>
-                <em>1 / ${compactNumber(card.rarity)}</em>
+                <em>1 / ${rarityCompact(card.rarity)}</em>
               </button>
             `).join('') : '<div class="empty-state">No matching cards.</div>'}
           </div>
@@ -1756,7 +1768,7 @@ function bindDepthTooltips() {
       '<div class="tip-name">' + esc(card.name) + '</div>' +
       '<div class="tip-ability">' + esc(card.ability || 'No ability') + '</div>' +
       '<div class="tip-desc">' + esc(abilityDescription(card)) + '</div>' +
-      '<div class="tip-rarity">' + rarityLabel + ': 1 / ' + Number(rarity || 0).toLocaleString() +
+      '<div class="tip-rarity">' + rarityLabel + ': 1 / ' + rarityCompact(rarity || 0) +
       (mutation ? ' · ' + esc(mutation) + ' Mutation ×' + DEPTH_MUTATION_MULT[mutation] : '') +
       '</div>'
 
