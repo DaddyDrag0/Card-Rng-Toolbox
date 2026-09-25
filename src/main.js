@@ -6,6 +6,7 @@ const app = document.querySelector('#app')
 let route = location.hash.replace(/^#\/?/, '') || 'dashboard'
 let cardCatalog = []
 let auraCatalog = []
+let abilityDescriptions = {}
 let thumbnails = {}
 let libraryQuery = ''
 let librarySort = 'rarity-desc'
@@ -46,6 +47,11 @@ fetch('./src/data/auras.json?v=1', { cache: 'no-store' })
   .then(auras => { auraCatalog = Array.isArray(auras) ? auras : []; if (route === 'deck-helper') render() })
   .catch(() => {})
 
+fetch('./src/data/abilities.json?v=1', { cache: 'no-store' })
+  .then(response => response.ok ? response.json() : {})
+  .then(data => { abilityDescriptions = data && typeof data === 'object' ? data : {}; render() })
+  .catch(() => {})
+
 fetch('./src/data/thumbnails.json?v=1', { cache: 'no-store' })
   .then(response => response.ok ? response.json() : {})
   .then(data => { thumbnails = data && typeof data === 'object' ? data : {}; render() })
@@ -60,6 +66,19 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({
 function cardByName(name) {
   return cardCatalog.find(card => card.name === name) || null
 }
+
+function abilityDescription(cardOrAbility) {
+  const ability = typeof cardOrAbility === 'string' ? cardOrAbility : cardOrAbility?.ability
+  if (!ability) return 'No ability.'
+  return abilityDescriptions[ability] || 'No ability description found.'
+}
+
+function rarityWithDepthBorders(card, borders = []) {
+  let rarity = card?.name === 'Ouroboros' ? 100000000000000 : Number(card?.rarity || 0)
+  for (const border of borders) rarity *= DEPTH_BORDER_MULT?.[border] || 1
+  return rarity
+}
+
 
 function cardImageUrl(nameOrCard) {
   const card = typeof nameOrCard === 'string' ? cardByName(nameOrCard) : nameOrCard
@@ -355,13 +374,16 @@ function cardLibraryPage() {
             const stats = baseCardStats(card)
             return `
               <article class="library-card">
-                ${cardImage(card,'library-card-image')}
+                <div class="library-card-art">${cardImage(card,'library-card-image')}</div>
                 <div class="library-card-content">
                   <div class="library-card-top">
                     <strong>${esc(card.name)}</strong>
                     <span>1 / ${Number(card.rarity || 0).toLocaleString()}</span>
                   </div>
-                  <p>${esc(card.ability || 'No ability')}</p>
+                  <div class="library-ability">
+                    <b>${esc(card.ability || 'No ability')}</b>
+                    <p>${esc(abilityDescription(card))}</p>
+                  </div>
                   <div class="library-stats">
                     <span><b>${compactNumber(stats.attack)}</b> ATK</span>
                     <span><b>${compactNumber(stats.health)}</b> HP</span>
@@ -1043,7 +1065,7 @@ function depthsPage() {
   const query = depthsQuery.trim().toLowerCase()
   const selectable = cardCatalog
     .filter(card => !card.unobtainable || card.name === 'Conqueror')
-    .filter(card => !state.ownedOnly || !activeProfile().import.importedAt || owned.has(card.name))
+    .filter(card => !state.ownedOnly || owned.has(card.name))
     .filter(card => !query || card.name.toLowerCase().includes(query) || String(card.ability || '').toLowerCase().includes(query))
     .sort((a,b) => b.rarity - a.rarity)
     .slice(0,100)
@@ -1096,7 +1118,7 @@ function depthsPage() {
               const mutation = depthMutationEligible(card) ? (slot.mutationWeather || '') : ''
               const stats = depthCardStats(card, slot)
               return `
-                <div class="depths-exact-team-row ${state.activeSlot===index?'active':''}" data-depth-slot="${index}" draggable="true">
+                <div class="depths-exact-team-row ${state.activeSlot===index?'active':''}" data-depth-slot="${index}" data-tooltip-card="${esc(card.name)}" data-tooltip-slot="${index}" draggable="true">
                   <span class="depths-exact-slot">0${index+1}</span>
                   ${cardImage(card,'depths-exact-portrait')}
                   <span class="depths-exact-card-copy">
@@ -1124,11 +1146,11 @@ function depthsPage() {
           </div>
           <div class="depth-library-toolbar">
             <input id="depthSearch" class="depths-exact-search" value="${esc(depthsQuery)}" placeholder="Search card or ability…" autocomplete="off">
-            <button class="secondary small" data-depth-owned-toggle>${state.ownedOnly && activeProfile().import.importedAt ? 'Owned Only' : 'All Cards'}</button>
+            <button class="secondary small" data-depth-owned-toggle>${state.ownedOnly ? 'Owned Only' : 'All Cards'}</button>
           </div>
           <div class="depths-exact-library-list">
             ${selectable.length ? selectable.map(card => `
-              <button data-depth-card="${esc(card.name)}" class="${team.cards[state.activeSlot]?.cardName===card.name?'selected':''}">
+              <button data-depth-card="${esc(card.name)}" data-tooltip-card="${esc(card.name)}" class="${team.cards[state.activeSlot]?.cardName===card.name?'selected':''}">
                 ${cardImage(card,'depths-exact-mini-portrait')}
                 <span><b>${esc(card.name)}</b><small>${esc(card.ability || 'No ability')}</small></span>
                 <em>1 / ${compactNumber(card.rarity)}</em>
@@ -1282,6 +1304,7 @@ function render() {
       </main>
     </div>
     <div id="modalRoot"></div>
+    <div id="cardTooltip" class="card-tooltip"></div>
   `
   bind()
 }
@@ -1708,6 +1731,52 @@ function updateTowerCalculator() {
   atk.textContent = Math.ceil(power / 2).toLocaleString() + ' ATK'
 }
 
+function bindDepthTooltips() {
+  const tooltip = document.querySelector('#cardTooltip')
+  if (!tooltip) return
+
+  const hide = () => tooltip.classList.remove('show')
+  const show = element => {
+    const card = cardByName(element.dataset.tooltipCard)
+    if (!card) return
+
+    const state = depthsToolState()
+    const slotIndex = Number(element.dataset.tooltipSlot)
+    const slot = Number.isInteger(slotIndex) && slotIndex >= 0
+      ? state.teams[state.activeTeam]?.cards?.[slotIndex]
+      : null
+    const borders = slot?.cardName === card.name && Array.isArray(slot.borders) ? slot.borders : []
+    const mutation = slot?.cardName === card.name && DEPTH_MUTATIONS.includes(slot?.mutationWeather)
+      ? slot.mutationWeather
+      : ''
+    const rarity = rarityWithDepthBorders(card, borders)
+    const rarityLabel = borders.length ? 'Modified rarity' : 'Base rarity'
+
+    tooltip.innerHTML =
+      '<div class="tip-name">' + esc(card.name) + '</div>' +
+      '<div class="tip-ability">' + esc(card.ability || 'No ability') + '</div>' +
+      '<div class="tip-desc">' + esc(abilityDescription(card)) + '</div>' +
+      '<div class="tip-rarity">' + rarityLabel + ': 1 / ' + Number(rarity || 0).toLocaleString() +
+      (mutation ? ' · ' + esc(mutation) + ' Mutation ×' + DEPTH_MUTATION_MULT[mutation] : '') +
+      '</div>'
+
+    tooltip.classList.add('show')
+    const rect = element.getBoundingClientRect()
+    const width = Math.min(320, window.innerWidth - 24)
+    let left = rect.right + 10
+    if (left + width > window.innerWidth - 12) left = Math.max(12, rect.left - width - 10)
+    tooltip.style.left = left + 'px'
+    tooltip.style.top = Math.min(window.innerHeight - 180, Math.max(12, rect.top)) + 'px'
+  }
+
+  document.querySelectorAll('[data-tooltip-card]').forEach(element => {
+    element.addEventListener('mouseenter', () => show(element))
+    element.addEventListener('mouseleave', hide)
+    element.addEventListener('focus', () => show(element))
+    element.addEventListener('blur', hide)
+  })
+}
+
 function bind() {
   document.querySelectorAll('[data-route]').forEach(button => button.onclick = () => routeTo(button.dataset.route))
   document.querySelectorAll('[data-action="import-json"]').forEach(button => button.onclick = openImport)
@@ -2055,6 +2124,7 @@ function bind() {
   document.querySelector('#towerCalcDifficulty')?.addEventListener('change', updateTowerCalculator)
   updateRollCalculator()
   updateTowerCalculator()
+  bindDepthTooltips()
 }
 
 window.addEventListener('hashchange', () => {
