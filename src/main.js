@@ -37,9 +37,20 @@ const depthsProgress = {}
 const depthsLastProgressRender = new Map()
 const depthsResults = {}
 
-fetch('./src/data/cards.json?v=2', { cache: 'no-store' })
+fetch('./src/data/cards.json?v=3', { cache: 'no-store' })
   .then(response => response.ok ? response.json() : [])
-  .then(cards => { cardCatalog = Array.isArray(cards) ? cards : []; if (route === 'library') render() })
+  .then(cards => {
+    const incoming = Array.isArray(cards) ? cards : []
+    const byName = new Map()
+    for (const card of incoming) {
+      const name = String(card?.name || '').trim()
+      if (!name) continue
+      const current = byName.get(name)
+      if (!current || (current.unobtainable && !card.unobtainable)) byName.set(name, card)
+    }
+    cardCatalog = [...byName.values()]
+    if (route === 'library') render()
+  })
   .catch(() => {})
 
 fetch('./src/data/auras.json?v=1', { cache: 'no-store' })
