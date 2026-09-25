@@ -873,7 +873,8 @@ function defaultDepthsState() {
   return {
     activeTeam: 0,
     activeSlot: 0,
-    ownedOnly: Boolean(activeProfile().import.importedAt),
+    ownedOnly: true,
+    ownedOnlySet: false,
     teams: Array.from({ length: 5 }, () => ({
       cards: Array.from({ length: 4 }, () => ({ cardName: '', borders: [], mutationWeather: '' })),
       statAura: '',
@@ -897,6 +898,10 @@ function depthsToolState() {
   const saved = store.get().toolState?.depths?.[activeProfile().id]
   if (!saved) return defaultDepthsState()
   const next = { ...defaultDepthsState(), ...saved }
+  if (saved.ownedOnlySet !== true) {
+    next.ownedOnly = true
+    next.ownedOnlySet = false
+  }
   next.depthBanLayouts = Array.isArray(saved.depthBanLayouts)
     ? Array.from({ length: 4 }, (_,index) => sanitizeDepthBans(saved.depthBanLayouts[index]))
     : [sanitizeDepthBans(saved.depthBans),[],[],[]]
@@ -2019,7 +2024,10 @@ function bind() {
     clearDepthResult(depthsToolState().activeTeam)
     updateDepthsToolState(state => { state.teams[state.activeTeam][button.dataset.depthAuraBorderKey] = button.dataset.depthAuraBorder })
   }))
-  document.querySelector('[data-depth-owned-toggle]')?.addEventListener('click', () => updateDepthsToolState(state => { state.ownedOnly = !state.ownedOnly }))
+  document.querySelector('[data-depth-owned-toggle]')?.addEventListener('click', () => updateDepthsToolState(state => {
+    state.ownedOnly = !state.ownedOnly
+    state.ownedOnlySet = true
+  }))
   const depthSearch = document.querySelector('#depthSearch')
   if (depthSearch) depthSearch.oninput = () => {
     depthsQuery = depthSearch.value
